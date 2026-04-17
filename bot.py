@@ -272,6 +272,15 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "Please tap Approve or Decline below."
     )
 
+    admin_text = (
+        "🔔 New Interest Request\n\n"
+        "Profile: " + profile_id + "\n"
+        "From: " + username_display + "\n"
+        "Owner: @" + owner_username + "\n"
+        "Request ID: " + str(request_id)
+    )
+
+    # Send to owner if registered
     sent_to_owner = False
     if owner_tg_id:
         try:
@@ -284,20 +293,17 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except Exception as e:
             logging.warning("Could not message owner: " + str(e))
 
-    if not sent_to_owner:
-        admin_text = (
-            "New Interest Request\n\n"
-            "Owner (@" + owner_username + ") not registered — sending to admin.\n\n"
-            "Request ID: " + str(request_id) + "\n"
-            "Profile: " + profile_id + "\n"
-            "From: " + username_display + "\n"
-            "Telegram ID: " + str(user.id)
-        )
-        await context.bot.send_message(
-            chat_id=ADMIN_TELEGRAM_USER_ID,
-            text=admin_text,
-            reply_markup=admin_request_markup(request_id),
-        )
+    # Always notify admin with approve/decline buttons
+    if sent_to_owner:
+        admin_text += "\n\n✅ Request sent to owner. You can also approve/decline below."
+    else:
+        admin_text += "\n\n⚠️ Owner not registered — approve/decline below."
+
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_USER_ID,
+        text=admin_text,
+        reply_markup=admin_request_markup(request_id),
+    )
 
 
 async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -356,6 +362,11 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     req = req_result.data[0]
+
+    if req.get("status") != "pending":
+        await query.edit_message_text("This request has already been decided.")
+        return
+
     requester_id = req["requester_telegram_user_id"]
     profile_id = req["profile_id"]
 
@@ -387,6 +398,11 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "decided_by_admin": user.id,
         }).eq("id", request_id).execute()
 
+        supabase.table("user_state").update({
+            "active_request_id": None,
+            "state": "free",
+        }).eq("telegram_user_id", requester_id).execute()
+
         p = profile_result.data[0] if profile_result.data else {}
         gender = p.get("gender", "").lower()
         full_name = p.get("full_name", "")
@@ -415,10 +431,10 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await context.bot.send_message(
             chat_id=ADMIN_TELEGRAM_USER_ID,
-            text="Approved: profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username", requester_id)),
+            text="✅ Approved: profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username", requester_id)) + " by @" + str(user.username or user.id),
         )
 
-        await query.edit_message_text("You approved request " + str(request_id) + " for profile " + profile_id + ".")
+        await query.edit_message_text("✅ You approved request " + str(request_id) + " for profile " + profile_id + ".")
 
     elif action == "decline":
         supabase.table("requests").update({
@@ -439,10 +455,10 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await context.bot.send_message(
             chat_id=ADMIN_TELEGRAM_USER_ID,
-            text="Declined: profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username", requester_id)),
+            text="❌ Declined: profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username", requester_id)) + " by @" + str(user.username or user.id),
         )
 
-        await query.edit_message_text("You declined request " + str(request_id) + " for profile " + profile_id + ".")
+        await query.edit_message_text("❌ You declined request " + str(request_id) + " for profile " + profile_id + ".")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
