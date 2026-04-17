@@ -129,6 +129,7 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     p = result.data[0]
+    is_new = not p.get("notified")
 
     raw = p.get("formatted_text") or ""
     if raw:
@@ -139,6 +140,9 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         text = "Profile " + profile_id + "\n" + p.get("city", "") + ", " + p.get("country", "")
 
+    if is_new:
+        text = "🆕 NEW PROFILE\n\n" + text
+
     await context.bot.send_message(
         chat_id=CHANNEL_ID,
         text=text,
@@ -146,7 +150,7 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await update.message.reply_text("Profile " + profile_id + " posted to channel.")
 
-    if not p.get("notified"):
+    if is_new:
         owner_tg_id = p.get("owner_telegram_user_id")
         owner_username = p.get("owner_telegram_username", "")
         welcome_msg = (
@@ -487,6 +491,40 @@ async def unlock_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text("User " + str(target_id) + " has been unlocked.")
 
 
+async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    total_profiles = supabase.table("profiles").select("id", count="exact").execute()
+    active_profiles = supabase.table("profiles").select("id", count="exact").eq("is_active", True).execute()
+    pending = supabase.table("requests").select("id", count="exact").eq("status", "pending").execute()
+    approved = supabase.table("requests").select("id", count="exact").eq("status", "approved").execute()
+    declined = supabase.table("requests").select("id", count="exact").eq("status", "declined").execute()
+    withdrawn = supabase.table("requests").select("id", count="exact").eq("status", "withdrawn").execute()
+
+    recent = supabase.table("requests").select("*").eq("status", "pending").order("created_at", desc=True).limit(5).execute()
+
+    lines = [
+        "📊 Mithaq Dashboard\n",
+        "👥 Total profiles: " + str(total_profiles.count),
+        "✅ Active profiles: " + str(active_profiles.count),
+        "",
+        "🔔 Pending requests: " + str(pending.count),
+        "✅ Approved: " + str(approved.count),
+        "❌ Declined: " + str(declined.count),
+        "🔄 Withdrawn: " + str(withdrawn.count),
+    ]
+
+    if recent.data:
+        lines.append("\nRecent pending:")
+        for r in recent.data:
+            lines.append("• " + r["profile_id"] + " — @" + str(r.get("requester_username", r["requester_telegram_user_id"])))
+
+    await update.message.reply_text("\n".join(lines))
+
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -494,6 +532,7 @@ def main() -> None:
     app.add_handler(CommandHandler("post_profile", post_profile))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("unlock", unlock_user))
+    app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|decline|withdraw):"))
 
