@@ -62,6 +62,107 @@ def interest_confirmation_markup(request_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def queue_confirmation_markup(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Leave Queue", callback_data="withdraw:" + str(request_id))]]
+    )
+
+
+async def advance_queue(profile_id: str, context) -> None:
+    """Advance the queue for a profile after a decision is made."""
+    next_result = (
+        supabase.table("requests")
+        .select("*")
+        .eq("profile_id", profile_id)
+        .eq("status", "pending")
+        .eq("is_active_request", False)
+        .order("queue_position", desc=False)
+        .limit(1)
+        .execute()
+    )
+
+    if not next_result.data:
+        return
+
+    next_req = next_result.data[0]
+    next_request_id = next_req["id"]
+    next_requester_id = next_req["requester_telegram_user_id"]
+    next_username = next_req.get("requester_username", str(next_requester_id))
+
+    supabase.table("requests").update({
+        "is_active_request": True,
+    }).eq("id", next_request_id).execute()
+
+    supabase.table("user_state").update({
+        "active_request_id": next_request_id,
+        "state": "locked",
+    }).eq("telegram_user_id", next_requester_id).execute()
+
+    profile_result = (
+        supabase.table("profiles")
+        .select("*")
+        .eq("id", profile_id)
+        .limit(1)
+        .execute()
+    )
+
+    owner_tg_id = None
+    owner_username = ""
+    if profile_result.data:
+        owner_tg_id = profile_result.data[0].get("owner_telegram_user_id")
+        owner_username = profile_result.data[0].get("owner_telegram_username", "")
+
+    await context.bot.send_message(
+        chat_id=next_requester_id,
+        text=(
+            "🔔 It's your turn! Your interest in profile " + profile_id + " is now being considered by the profile owner insha'Allah. 🤲\n\n"
+            "You will be notified of their decision.\n\n"
+            "To withdraw, tap the button below or send /withdraw"
+        ),
+        reply_markup=interest_confirmation_markup(next_request_id),
+    )
+
+    username_display = "@" + next_username if next_username != str(next_requester_id) else "User ID: " + str(next_requester_id)
+    request_text = (
+        "New Interest Request for your profile " + profile_id + "\n\n"
+        "Someone has expressed interest in your profile.\n\n"
+        "Request ID: " + str(next_request_id) + "\n"
+        "From: " + username_display + "\n\n"
+        "Please tap Approve or Decline below."
+    )
+
+    admin_text = (
+        "🔔 Queue Advanced — New Interest Request\n\n"
+        "Profile: " + profile_id + "\n"
+        "From: " + username_display + "\n"
+        "Owner: @" + owner_username + "\n"
+        "Request ID: " + str(next_request_id)
+    )
+
+    sent_to_owner = False
+    if owner_tg_id:
+        try:
+            await context.bot.send_message(
+                chat_id=owner_tg_id,
+                text=request_text,
+                reply_markup=owner_request_markup(next_request_id),
+            )
+            sent_to_owner = True
+        except Exception as e:
+            logging.warning("Could not message owner: " + str(e))
+
+    if sent_to_owner:
+        admin_text += "\n\n✅ Request sent to owner. You can also approve/decline below."
+    else:
+        admin_text += "\n\n⚠️ Owner not registered — approve/decline below."
+
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_USER_ID,
+        text=admin_text,
+        reply_markup=admin_request_markup(next_request_id),
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user:
         return
@@ -96,11 +197,139 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "4️⃣ If approved, you'll receive their contact details here\n\n"
         "📌 You can only have one active request at a time\n"
         "📌 If declined, you're free to express interest in another profile\n"
-        "📌 You can withdraw your interest at any time before a decision\n\n"
+        "📌 You can withdraw your interest at any time — just send /withdraw\n"
+        "📌 To check your request status, send /my_request\n\n"
         "📢 Browse profiles here: https://t.me/+ilWsgu9hLb02ODQ0\n\n"
         "Questions or issues? Contact @MithaqAdmin\n\n"
         "JazakAllahu khayran — may Allah make it easy for you 🤲"
     )
+
+
+async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user:
+        return
+
+    state_result = (
+        supabase.table("user_state")
+        .select("*")
+        .eq("telegram_user_id", user.id)
+        .limit(1)
+        .execute()
+    )
+
+    if not state_result.data or state_result.data[0].get("state") not in ["locked", "queued"]:
+        await update.message.reply_text("You don't have an active interest request to withdraw.")
+        return
+
+    active_request_id = state_result.data[0].get("active_request_id")
+
+    if not active_request_id:
+        supabase.table("user_state").update({
+            "state": "free",
+        }).eq("telegram_user_id", user.id).execute()
+        await update.message.reply_text("You have been unlocked. You may now express interest in another profile.")
+        return
+
+    req_result = (
+        supabase.table("requests")
+        .select("*")
+        .eq("id", active_request_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not req_result.data or req_result.data[0].get("status") != "pending":
+        supabase.table("user_state").update({
+            "active_request_id": None,
+            "state": "free",
+        }).eq("telegram_user_id", user.id).execute()
+        await update.message.reply_text("Your request has already been decided. You are free to express interest in another profile.")
+        return
+
+    profile_id = req_result.data[0]["profile_id"]
+    was_active = req_result.data[0].get("is_active_request", False)
+
+    supabase.table("requests").update({
+        "status": "withdrawn",
+        "decided_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", active_request_id).execute()
+
+    supabase.table("user_state").update({
+        "active_request_id": None,
+        "state": "free",
+    }).eq("telegram_user_id", user.id).execute()
+
+    await update.message.reply_text(
+        "Your interest in profile " + profile_id + " has been withdrawn. You are now free to express interest in another profile. 🤲"
+    )
+
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_USER_ID,
+        text="Request " + str(active_request_id) + " withdrawn via /withdraw by @" + str(user.username or user.id),
+    )
+
+    if was_active:
+        await advance_queue(profile_id, context)
+
+
+async def my_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user:
+        return
+
+    state_result = (
+        supabase.table("user_state")
+        .select("*")
+        .eq("telegram_user_id", user.id)
+        .limit(1)
+        .execute()
+    )
+
+    if not state_result.data or state_result.data[0].get("state") not in ["locked", "queued"]:
+        await update.message.reply_text("You don't have an active interest request.")
+        return
+
+    active_request_id = state_result.data[0].get("active_request_id")
+
+    if not active_request_id:
+        await update.message.reply_text("You don't have an active interest request.")
+        return
+
+    req_result = (
+        supabase.table("requests")
+        .select("*")
+        .eq("id", active_request_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not req_result.data:
+        await update.message.reply_text("No active request found.")
+        return
+
+    req = req_result.data[0]
+    profile_id = req["profile_id"]
+    is_active = req.get("is_active_request", False)
+    queue_pos = req.get("queue_position", 1)
+
+    if is_active:
+        await update.message.reply_text(
+            "Your current interest request:\n\n"
+            "Profile: " + profile_id + "\n"
+            "Status: ⏳ Pending — waiting for owner response\n\n"
+            "To withdraw, tap below or send /withdraw",
+            reply_markup=interest_confirmation_markup(active_request_id),
+        )
+    else:
+        await update.message.reply_text(
+            "Your current interest request:\n\n"
+            "Profile: " + profile_id + "\n"
+            "Status: 🔢 In queue (position " + str(queue_pos) + ")\n\n"
+            "You'll be notified when it's your turn insha'Allah.\n"
+            "To leave the queue, tap below or send /withdraw",
+            reply_markup=queue_confirmation_markup(active_request_id),
+        )
 
 
 async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,9 +429,11 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         .execute()
     )
 
-    if state_result.data and state_result.data[0].get("state") == "locked":
+    user_state = state_result.data[0].get("state") if state_result.data else "free"
+
+    if user_state == "locked":
         await query.answer(
-            "You already have a pending request. Please wait for a response first.",
+            "You already have an active pending request. Send /my_request to see it or /withdraw to cancel it.",
             show_alert=True,
         )
         return
@@ -223,6 +454,29 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     owner_username = profile.get("owner_telegram_username", "")
     owner_tg_id = profile.get("owner_telegram_user_id")
 
+    # Check if there's already an active request for this profile
+    active_check = (
+        supabase.table("requests")
+        .select("id")
+        .eq("profile_id", profile_id)
+        .eq("status", "pending")
+        .eq("is_active_request", True)
+        .limit(1)
+        .execute()
+    )
+
+    # Get queue position
+    queue_count = (
+        supabase.table("requests")
+        .select("id", count="exact")
+        .eq("profile_id", profile_id)
+        .eq("status", "pending")
+        .execute()
+    )
+
+    queue_position = (queue_count.count or 0) + 1
+    is_first_in_queue = len(active_check.data) == 0
+
     request_result = (
         supabase.table("requests")
         .insert({
@@ -230,6 +484,8 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "requester_username": user.username or "unknown",
             "profile_id": profile_id,
             "status": "pending",
+            "is_active_request": is_first_in_queue,
+            "queue_position": queue_position,
         })
         .execute()
     )
@@ -240,70 +496,115 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     request_id = request_result.data[0]["id"]
 
-    if state_result.data:
-        supabase.table("user_state").update({
-            "active_request_id": request_id,
-            "state": "locked",
-        }).eq("telegram_user_id", user.id).execute()
+    if is_first_in_queue:
+        # First in queue — lock the user
+        if state_result.data:
+            supabase.table("user_state").update({
+                "active_request_id": request_id,
+                "state": "locked",
+            }).eq("telegram_user_id", user.id).execute()
+        else:
+            supabase.table("user_state").insert({
+                "telegram_user_id": user.id,
+                "active_request_id": request_id,
+                "state": "locked",
+            }).execute()
+
+        await query.answer(
+            "✅ Interest sent! You will be notified of the response insha'Allah.",
+            show_alert=True,
+        )
+
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "JazakAllahu khayran! Your interest in profile " + profile_id + " has been recorded. "
+                "The profile owner will be notified and will respond insha'Allah. 🤲\n\n"
+                "📌 To withdraw your interest at any time, tap below or send /withdraw\n"
+                "📌 To check your request status, send /my_request"
+            ),
+            reply_markup=interest_confirmation_markup(request_id),
+        )
+
+        username_display = "@" + user.username if user.username else "User ID: " + str(user.id)
+        request_text = (
+            "New Interest Request for your profile " + profile_id + "\n\n"
+            "Someone has expressed interest in your profile.\n\n"
+            "Request ID: " + str(request_id) + "\n"
+            "From: " + username_display + "\n\n"
+            "Please tap Approve or Decline below."
+        )
+
+        admin_text = (
+            "🔔 New Interest Request\n\n"
+            "Profile: " + profile_id + "\n"
+            "From: " + username_display + "\n"
+            "Owner: @" + owner_username + "\n"
+            "Request ID: " + str(request_id)
+        )
+
+        sent_to_owner = False
+        if owner_tg_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_tg_id,
+                    text=request_text,
+                    reply_markup=owner_request_markup(request_id),
+                )
+                sent_to_owner = True
+            except Exception as e:
+                logging.warning("Could not message owner: " + str(e))
+
+        if sent_to_owner:
+            admin_text += "\n\n✅ Request sent to owner. You can also approve/decline below."
+        else:
+            admin_text += "\n\n⚠️ Owner not registered — approve/decline below."
+
+        await context.bot.send_message(
+            chat_id=ADMIN_TELEGRAM_USER_ID,
+            text=admin_text,
+            reply_markup=admin_request_markup(request_id),
+        )
+
     else:
-        supabase.table("user_state").insert({
-            "telegram_user_id": user.id,
-            "active_request_id": request_id,
-            "state": "locked",
-        }).execute()
+        # In queue — don't lock the user, just notify them
+        if state_result.data:
+            supabase.table("user_state").update({
+                "active_request_id": request_id,
+                "state": "queued",
+            }).eq("telegram_user_id", user.id).execute()
+        else:
+            supabase.table("user_state").insert({
+                "telegram_user_id": user.id,
+                "active_request_id": request_id,
+                "state": "queued",
+            }).execute()
 
-    await query.answer(
-        "✅ Interest sent! You will be notified of the response insha'Allah.",
-        show_alert=True,
-    )
+        await query.answer(
+            "✅ You've been added to the queue for this profile insha'Allah.",
+            show_alert=True,
+        )
 
-    await context.bot.send_message(
-        chat_id=user.id,
-        text="JazakAllahu khayran! Your interest in profile " + profile_id + " has been recorded. The profile owner will be notified and will respond insha'Allah. 🤲",
-        reply_markup=interest_confirmation_markup(request_id),
-    )
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "JazakAllahu khayran! You have been added to the queue for profile " + profile_id + ". 🤲\n\n"
+                "You are number " + str(queue_position) + " in the queue.\n"
+                "You will be notified when it's your turn insha'Allah.\n\n"
+                "📌 You are free to express interest in other profiles while you wait\n"
+                "📌 To leave the queue, tap below or send /withdraw"
+            ),
+            reply_markup=queue_confirmation_markup(request_id),
+        )
 
-    username_display = "@" + user.username if user.username else "User ID: " + str(user.id)
-    request_text = (
-        "New Interest Request for your profile " + profile_id + "\n\n"
-        "Someone has expressed interest in your profile.\n\n"
-        "Request ID: " + str(request_id) + "\n"
-        "From: " + username_display + "\n\n"
-        "Please tap Approve or Decline below."
-    )
-
-    admin_text = (
-        "🔔 New Interest Request\n\n"
-        "Profile: " + profile_id + "\n"
-        "From: " + username_display + "\n"
-        "Owner: @" + owner_username + "\n"
-        "Request ID: " + str(request_id)
-    )
-
-    # Send to owner if registered
-    sent_to_owner = False
-    if owner_tg_id:
-        try:
-            await context.bot.send_message(
-                chat_id=owner_tg_id,
-                text=request_text,
-                reply_markup=owner_request_markup(request_id),
-            )
-            sent_to_owner = True
-        except Exception as e:
-            logging.warning("Could not message owner: " + str(e))
-
-    # Always notify admin with approve/decline buttons
-    if sent_to_owner:
-        admin_text += "\n\n✅ Request sent to owner. You can also approve/decline below."
-    else:
-        admin_text += "\n\n⚠️ Owner not registered — approve/decline below."
-
-    await context.bot.send_message(
-        chat_id=ADMIN_TELEGRAM_USER_ID,
-        text=admin_text,
-        reply_markup=admin_request_markup(request_id),
-    )
+        await context.bot.send_message(
+            chat_id=ADMIN_TELEGRAM_USER_ID,
+            text=(
+                "🔢 Queue Update\n\n"
+                "Profile: " + profile_id + "\n"
+                "@" + str(user.username or user.id) + " added to queue at position " + str(queue_position)
+            ),
+        )
 
 
 async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -319,17 +620,21 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     request_id = int(request_id_str)
 
     if action == "withdraw":
-        state_result = (
-            supabase.table("user_state")
+        req_result = (
+            supabase.table("requests")
             .select("*")
-            .eq("telegram_user_id", user.id)
+            .eq("id", request_id)
             .limit(1)
             .execute()
         )
 
-        if not state_result.data or state_result.data[0].get("state") != "locked":
-            await query.edit_message_text("No active request to withdraw.")
+        if not req_result.data or req_result.data[0].get("status") != "pending":
+            await query.edit_message_text("This request has already been decided.")
             return
+
+        profile_id = req_result.data[0]["profile_id"]
+        was_active = req_result.data[0].get("is_active_request", False)
+        requester_id = req_result.data[0]["requester_telegram_user_id"]
 
         supabase.table("requests").update({
             "status": "withdrawn",
@@ -339,7 +644,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         supabase.table("user_state").update({
             "active_request_id": None,
             "state": "free",
-        }).eq("telegram_user_id", user.id).execute()
+        }).eq("telegram_user_id", requester_id).execute()
 
         await query.edit_message_text("Your interest request has been withdrawn. You may now express interest in another profile.")
 
@@ -347,6 +652,9 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             chat_id=ADMIN_TELEGRAM_USER_ID,
             text="Request " + str(request_id) + " withdrawn by @" + str(user.username or user.id),
         )
+
+        if was_active:
+            await advance_queue(profile_id, context)
         return
 
     req_result = (
@@ -436,6 +744,34 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await query.edit_message_text("✅ You approved request " + str(request_id) + " for profile " + profile_id + ".")
 
+        # After approval, decline all remaining queue for this profile
+        remaining = (
+            supabase.table("requests")
+            .select("*")
+            .eq("profile_id", profile_id)
+            .eq("status", "pending")
+            .execute()
+        )
+
+        for r in (remaining.data or []):
+            supabase.table("requests").update({
+                "status": "declined",
+                "decided_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", r["id"]).execute()
+
+            supabase.table("user_state").update({
+                "active_request_id": None,
+                "state": "free",
+            }).eq("telegram_user_id", r["requester_telegram_user_id"]).execute()
+
+            try:
+                await context.bot.send_message(
+                    chat_id=r["requester_telegram_user_id"],
+                    text="JazakAllahu khayran for your interest in profile " + profile_id + ". Unfortunately this profile is no longer available. You are welcome to express interest in another profile. 🤲"
+                )
+            except Exception as e:
+                logging.warning("Could not notify queued user: " + str(e))
+
     elif action == "decline":
         supabase.table("requests").update({
             "status": "declined",
@@ -460,6 +796,8 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await query.edit_message_text("❌ You declined request " + str(request_id) + " for profile " + profile_id + ".")
 
+        await advance_queue(profile_id, context)
+
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -482,7 +820,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines = ["Pending Requests:\n"]
     for r in result.data:
-        lines.append("Request " + str(r["id"]) + ": Profile " + r["profile_id"] + " from @" + str(r.get("requester_username", r["requester_telegram_user_id"])))
+        active = "🔔 Active" if r.get("is_active_request") else "🔢 Queue #" + str(r.get("queue_position", "?"))
+        lines.append(active + " — " + r["profile_id"] + " from @" + str(r.get("requester_username", r["requester_telegram_user_id"])))
 
     await update.message.reply_text("\n".join(lines))
 
@@ -520,7 +859,7 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     declined = supabase.table("requests").select("id", count="exact").eq("status", "declined").execute()
     withdrawn = supabase.table("requests").select("id", count="exact").eq("status", "withdrawn").execute()
 
-    recent = supabase.table("requests").select("*").eq("status", "pending").order("created_at", desc=True).limit(5).execute()
+    recent = supabase.table("requests").select("*").eq("status", "pending").eq("is_active_request", True).order("created_at", desc=True).limit(5).execute()
 
     lines = [
         "📊 Mithaq Dashboard\n",
@@ -534,7 +873,7 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
 
     if recent.data:
-        lines.append("\nRecent pending:")
+        lines.append("\nActive requests:")
         for r in recent.data:
             lines.append("• " + r["profile_id"] + " — @" + str(r.get("requester_username", r["requester_telegram_user_id"])))
 
@@ -549,6 +888,8 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("unlock", unlock_user))
     app.add_handler(CommandHandler("dashboard", dashboard))
+    app.add_handler(CommandHandler("withdraw", withdraw_command))
+    app.add_handler(CommandHandler("my_request", my_request))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|decline|withdraw):"))
 
