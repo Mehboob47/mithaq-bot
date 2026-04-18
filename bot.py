@@ -488,9 +488,18 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     profile = profile_result.data[0]
+    profile_status = profile.get("status", "active")
     owner_username = profile.get("owner_telegram_username", "")
     owner_tg_id = profile.get("owner_telegram_user_id")
     owner_gender = profile.get("gender", "").lower()
+
+    # Check profile status
+    if profile_status == "matched":
+        await query.answer(
+            "This profile has already been matched. JazakAllahu khayran 🤲",
+            show_alert=True,
+        )
+        return
 
     active_check = (
         supabase.table("requests")
@@ -512,6 +521,10 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     queue_position = (queue_count.count or 0) + 1
     is_first_in_queue = len(active_check.data) == 0
+
+    # If profile is "talking", always goes to queue
+    if profile_status == "talking":
+        is_first_in_queue = False
 
     request_result = (
         supabase.table("requests")
@@ -613,15 +626,26 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             show_alert=True,
         )
 
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=(
+        if profile_status == "talking":
+            queue_msg = (
+                "JazakAllahu khayran! This profile is currently in conversation with someone. "
+                "You have been added to the queue at position " + str(queue_position) + ". 🤲\n\n"
+                "You will be notified if they become available insha'Allah.\n\n"
+                "📌 You are free to express interest in other profiles while you wait\n"
+                "📌 To leave the queue, tap below or send /withdraw"
+            )
+        else:
+            queue_msg = (
                 "JazakAllahu khayran! You have been added to the queue for profile " + profile_id + ". 🤲\n\n"
                 "You are number " + str(queue_position) + " in the queue.\n"
                 "You will be notified when it's your turn insha'Allah.\n\n"
                 "📌 You are free to express interest in other profiles while you wait\n"
                 "📌 To leave the queue, tap below or send /withdraw"
-            ),
+            )
+
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=queue_msg,
             reply_markup=queue_confirmation_markup(request_id),
         )
 
@@ -629,7 +653,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             chat_id=ADMIN_TELEGRAM_USER_ID,
             text=(
                 "🔢 Queue Update\n\n"
-                "Profile: " + profile_id + "\n"
+                "Profile: " + profile_id + " (status: " + profile_status + ")\n"
                 "@" + str(user.username or user.id) + " added to queue at position " + str(queue_position)
             ),
         )
@@ -739,6 +763,11 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "state": "free",
         }).eq("telegram_user_id", requester_id).execute()
 
+        # Mark profile as matched
+        supabase.table("profiles").update({
+            "status": "matched"
+        }).eq("id", profile_id).execute()
+
         p = profile_result.data[0] if profile_result.data else {}
         gender = p.get("gender", "").lower()
         full_name = p.get("full_name", "")
@@ -772,6 +801,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await query.edit_message_text("✅ You approved request " + str(request_id) + " for profile " + profile_id + ".")
 
+        # Notify and clear all remaining queue
         remaining = (
             supabase.table("requests")
             .select("*")
@@ -907,6 +937,30 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def set_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Usage: /set_status MTHAQ-001 active|talking|matched")
+        return
+
+    profile_id = context.args[0].strip()
+    new_status = context.args[1].strip().lower()
+
+    if new_status not in ["active", "talking", "matched"]:
+        await update.message.reply_text("Status must be: active, talking, or matched")
+        return
+
+    supabase.table("profiles").update({
+        "status": new_status
+    }).eq("id", profile_id).execute()
+
+    await update.message.reply_text("Profile " + profile_id + " status updated to: " + new_status)
+
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -917,6 +971,7 @@ def main() -> None:
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CommandHandler("my_request", my_request))
+    app.add_handler(CommandHandler("set_status", set_status))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|decline|withdraw):"))
 
