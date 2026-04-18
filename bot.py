@@ -68,8 +68,49 @@ def queue_confirmation_markup(request_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def get_requester_profile_text(username: str, user_id: int) -> str:
+    if username:
+        result = (
+            supabase.table("profiles")
+            .select("id, formatted_text, gender, city, country")
+            .eq("owner_telegram_username", username.lower())
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            p = result.data[0]
+            profile_id = p.get("id", "")
+            raw = p.get("formatted_text") or ""
+            if raw:
+                lines = raw.split("\n")
+                preview = "\n".join(lines[:15])
+                return "\n\n📋 Their profile (" + profile_id + "):\n" + preview + "\n..."
+    return "\n\n📋 They do not have a profile registered on Mithaq yet."
+
+
+def build_owner_request_text(profile_id: str, username_display: str, requester_profile_text: str, owner_gender: str) -> str:
+    if owner_gender == "sister":
+        consent_note = (
+            "\n\n⚠️ By approving, they will receive your first name and your wali's contact details. "
+            "You will also receive their contact details."
+        )
+    else:
+        consent_note = (
+            "\n\n⚠️ By approving, they will receive your name and contact details. "
+            "You will also receive their contact details."
+        )
+
+    return (
+        "💍 New Interest Request for your profile " + profile_id + "\n\n"
+        "Someone has expressed interest in your profile.\n\n"
+        "From: " + username_display +
+        requester_profile_text +
+        consent_note +
+        "\n\nPlease tap Approve or Decline below."
+    )
+
+
 async def advance_queue(profile_id: str, context) -> None:
-    """Advance the queue for a profile after a decision is made."""
     next_result = (
         supabase.table("requests")
         .select("*")
@@ -108,9 +149,11 @@ async def advance_queue(profile_id: str, context) -> None:
 
     owner_tg_id = None
     owner_username = ""
+    owner_gender = ""
     if profile_result.data:
         owner_tg_id = profile_result.data[0].get("owner_telegram_user_id")
         owner_username = profile_result.data[0].get("owner_telegram_username", "")
+        owner_gender = profile_result.data[0].get("gender", "").lower()
 
     await context.bot.send_message(
         chat_id=next_requester_id,
@@ -123,20 +166,14 @@ async def advance_queue(profile_id: str, context) -> None:
     )
 
     username_display = "@" + next_username if next_username != str(next_requester_id) else "User ID: " + str(next_requester_id)
-    request_text = (
-        "New Interest Request for your profile " + profile_id + "\n\n"
-        "Someone has expressed interest in your profile.\n\n"
-        "Request ID: " + str(next_request_id) + "\n"
-        "From: " + username_display + "\n\n"
-        "Please tap Approve or Decline below."
-    )
+    requester_profile_text = get_requester_profile_text(next_username, next_requester_id)
+    request_text = build_owner_request_text(profile_id, username_display, requester_profile_text, owner_gender)
 
     admin_text = (
         "🔔 Queue Advanced — New Interest Request\n\n"
         "Profile: " + profile_id + "\n"
         "From: " + username_display + "\n"
         "Owner: @" + owner_username + "\n"
-        "Request ID: " + str(next_request_id)
     )
 
     sent_to_owner = False
@@ -152,9 +189,9 @@ async def advance_queue(profile_id: str, context) -> None:
             logging.warning("Could not message owner: " + str(e))
 
     if sent_to_owner:
-        admin_text += "\n\n✅ Request sent to owner. You can also approve/decline below."
+        admin_text += "\n✅ Request sent to owner. You can also approve/decline below."
     else:
-        admin_text += "\n\n⚠️ Owner not registered — approve/decline below."
+        admin_text += "\n⚠️ Owner not registered — approve/decline below."
 
     await context.bot.send_message(
         chat_id=ADMIN_TELEGRAM_USER_ID,
@@ -453,8 +490,8 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     profile = profile_result.data[0]
     owner_username = profile.get("owner_telegram_username", "")
     owner_tg_id = profile.get("owner_telegram_user_id")
+    owner_gender = profile.get("gender", "").lower()
 
-    # Check if there's already an active request for this profile
     active_check = (
         supabase.table("requests")
         .select("id")
@@ -465,7 +502,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         .execute()
     )
 
-    # Get queue position
     queue_count = (
         supabase.table("requests")
         .select("id", count="exact")
@@ -495,9 +531,10 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     request_id = request_result.data[0]["id"]
+    username_display = "@" + user.username if user.username else "User ID: " + str(user.id)
+    requester_profile_text = get_requester_profile_text(user.username or "", user.id)
 
     if is_first_in_queue:
-        # First in queue — lock the user
         if state_result.data:
             supabase.table("user_state").update({
                 "active_request_id": request_id,
@@ -526,21 +563,13 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             reply_markup=interest_confirmation_markup(request_id),
         )
 
-        username_display = "@" + user.username if user.username else "User ID: " + str(user.id)
-        request_text = (
-            "New Interest Request for your profile " + profile_id + "\n\n"
-            "Someone has expressed interest in your profile.\n\n"
-            "Request ID: " + str(request_id) + "\n"
-            "From: " + username_display + "\n\n"
-            "Please tap Approve or Decline below."
-        )
+        request_text = build_owner_request_text(profile_id, username_display, requester_profile_text, owner_gender)
 
         admin_text = (
             "🔔 New Interest Request\n\n"
             "Profile: " + profile_id + "\n"
             "From: " + username_display + "\n"
             "Owner: @" + owner_username + "\n"
-            "Request ID: " + str(request_id)
         )
 
         sent_to_owner = False
@@ -556,9 +585,9 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 logging.warning("Could not message owner: " + str(e))
 
         if sent_to_owner:
-            admin_text += "\n\n✅ Request sent to owner. You can also approve/decline below."
+            admin_text += "\n✅ Request sent to owner. You can also approve/decline below."
         else:
-            admin_text += "\n\n⚠️ Owner not registered — approve/decline below."
+            admin_text += "\n⚠️ Owner not registered — approve/decline below."
 
         await context.bot.send_message(
             chat_id=ADMIN_TELEGRAM_USER_ID,
@@ -567,7 +596,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
     else:
-        # In queue — don't lock the user, just notify them
         if state_result.data:
             supabase.table("user_state").update({
                 "active_request_id": request_id,
@@ -744,7 +772,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await query.edit_message_text("✅ You approved request " + str(request_id) + " for profile " + profile_id + ".")
 
-        # After approval, decline all remaining queue for this profile
         remaining = (
             supabase.table("requests")
             .select("*")
