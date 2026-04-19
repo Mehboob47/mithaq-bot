@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import requests
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -17,7 +18,6 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
-import asyncio
 
 load_dotenv()
 
@@ -36,9 +36,6 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "mithaq-secret-2026")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 flask_app = Flask(__name__)
-
-# Global reference to the telegram bot application
-telegram_app = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -80,6 +77,29 @@ def build_profile_text(p: dict) -> str:
     return "\n".join(lines)
 
 
+def send_telegram_message(chat_id: str, text: str, reply_markup: dict = None) -> bool:
+    """Send a message directly via Telegram Bot API HTTP (no async needed)."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        result = resp.json()
+        if not result.get("ok"):
+            logging.error(f"Telegram API error: {result}")
+            return False
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send Telegram message: {e}")
+        return False
+
+
 # ── Flask webhook ──────────────────────────────────────────────────────────────
 
 @flask_app.route("/health", methods=["GET"])
@@ -89,10 +109,6 @@ def health():
 
 @flask_app.route("/post_new_profile", methods=["POST"])
 def post_new_profile():
-    """
-    Called by Google Apps Script after inserting a new profile to Supabase.
-    Body: { "secret": "...", "profile_id": "MTHAQ-095" }
-    """
     data = request.get_json(silent=True)
 
     if not data:
@@ -105,7 +121,6 @@ def post_new_profile():
     if not profile_id:
         return jsonify({"error": "Missing profile_id"}), 400
 
-    # Fetch profile from Supabase
     result = (
         supabase.table("profiles")
         .select("*")
@@ -121,24 +136,19 @@ def post_new_profile():
     p = result.data[0]
     text = build_profile_text(p)
 
-    # Post to Telegram channel using the running event loop
-    async def _send():
-        await telegram_app.bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=profile_button_markup(profile_id),
-        )
+    reply_markup = {
+        "inline_keyboard": [[
+            {"text": "💍 Express Interest", "callback_data": f"interest:{profile_id}"}
+        ]]
+    }
 
-    future = asyncio.run_coroutine_threadsafe(_send(), telegram_app.loop)
-    try:
-        future.result(timeout=15)
-    except Exception as e:
-        logging.error(f"Failed to post profile {profile_id}: {e}")
-        return jsonify({"error": str(e)}), 500
+    success = send_telegram_message(CHANNEL_ID, text, reply_markup)
 
-    logging.info(f"Auto-posted profile {profile_id} to channel.")
-    return jsonify({"ok": True, "profile_id": profile_id}), 200
+    if success:
+        logging.info(f"Auto-posted profile {profile_id} to channel.")
+        return jsonify({"ok": True, "profile_id": profile_id}), 200
+    else:
+        return jsonify({"error": "Failed to send to Telegram"}), 500
 
 
 # ── Telegram handlers ──────────────────────────────────────────────────────────
@@ -149,7 +159,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     username = user.username
 
-    # Auto-register owner if they have a username
     if username:
         result = (
             supabase.table("profiles")
@@ -221,7 +230,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     _, profile_id = query.data.split(":", 1)
 
-    # Check if user already has an active request
     state_result = (
         supabase.table("user_state")
         .select("*")
@@ -237,7 +245,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    # Create the request
     request_result = (
         supabase.table("requests")
         .insert({
@@ -258,7 +265,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     request_id = request_result.data[0]["id"]
 
-    # Lock the requester
     if state_result.data:
         supabase.table("user_state").update({
             "active_request_id": request_id,
@@ -271,7 +277,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "state": "locked",
         }).execute()
 
-    # Confirm to requester
     await context.bot.send_message(
         chat_id=user.id,
         text=(
@@ -281,7 +286,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         parse_mode="Markdown"
     )
 
-    # Route to profile owner first, fall back to admin
     profile_result = (
         supabase.table("profiles")
         .select("owner_telegram_user_id")
@@ -311,7 +315,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         reply_markup=admin_request_markup(request_id),
     )
 
-    # Also notify admin if owner was notified instead
     if notify_id != ADMIN_TELEGRAM_USER_ID:
         await context.bot.send_message(
             chat_id=ADMIN_TELEGRAM_USER_ID,
@@ -396,7 +399,6 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin only: /status"""
     user = update.effective_user
     if not user or user.id != ADMIN_TELEGRAM_USER_ID:
         await update.message.reply_text("Not authorised.")
@@ -425,7 +427,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def unlock_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin only: /unlock TELEGRAM_USER_ID"""
     user = update.effective_user
     if not user or user.id != ADMIN_TELEGRAM_USER_ID:
         await update.message.reply_text("Not authorised.")
@@ -453,24 +454,21 @@ def run_flask():
 
 
 def main() -> None:
-    global telegram_app
-
-    telegram_app = Application.builder().token(BOT_TOKEN).build()
-
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("post_profile", post_profile))
-    telegram_app.add_handler(CommandHandler("status", status))
-    telegram_app.add_handler(CommandHandler("unlock", unlock_user))
-    telegram_app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
-    telegram_app.add_handler(CallbackQueryHandler(admin_decision, pattern=r"^(approve|decline):"))
-
-    # Start Flask in a background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     print(f"✅ Flask webhook server started on port {os.environ.get('FLASK_PORT', 8080)}")
 
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("post_profile", post_profile))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("unlock", unlock_user))
+    app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
+    app.add_handler(CallbackQueryHandler(admin_decision, pattern=r"^(approve|decline):"))
+
     print("✅ Mithaq bot is running...")
-    telegram_app.run_polling()
+    app.run_polling()
 
 
 if __name__ == "__main__":
