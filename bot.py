@@ -125,6 +125,21 @@ def send_telegram_message(chat_id: str, text: str, reply_markup: dict = None) ->
         return False
 
 
+# ── Helper: look up a requester's own profile ID ──────────────────────────────
+
+def get_requester_profile_id(username: str) -> str:
+    if not username:
+        return None
+    result = (
+        supabase.table("profiles")
+        .select("id")
+        .eq("owner_telegram_username", username.lower())
+        .limit(1)
+        .execute()
+    )
+    return result.data[0]["id"] if result.data else None
+
+
 # ── Queue helper ───────────────────────────────────────────────────────────────
 
 async def advance_queue(profile_id: str, context) -> None:
@@ -180,21 +195,21 @@ async def advance_queue(profile_id: str, context) -> None:
         reply_markup=interest_confirmation_markup(next_request_id),
     )
 
-    username_display = "@" + next_username if next_username != str(next_requester_id) else "User ID: " + str(next_requester_id)
+    # Look up requester's profile ID (not username)
+    requester_profile_id = get_requester_profile_id(next_username)
+    requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
+
     request_text = (
         "New Interest Request for your profile " + profile_id + "\n\n"
-        "Someone has expressed interest in your profile.\n\n"
-        "Request ID: " + str(next_request_id) + "\n"
-        "From: " + username_display + "\n\n"
+        + requester_profile_text + " has expressed interest in your profile.\n\n"
         "Please tap Approve or Decline below."
     )
 
     admin_text = (
         "🔔 Queue Advanced — New Interest Request\n\n"
         "Profile: " + profile_id + "\n"
-        "From: " + username_display + "\n"
-        "Owner: @" + owner_username + "\n"
-        "Request ID: " + str(next_request_id)
+        "From: @" + next_username + " (" + requester_profile_text + ")\n"
+        "Owner: @" + owner_username
     )
 
     sent_to_owner = False
@@ -267,10 +282,8 @@ def post_new_profile():
     if not success:
         return jsonify({"error": "Failed to send to Telegram"}), 500
 
-    # Mark as notified
     supabase.table("profiles").update({"notified": True}).eq("id", profile_id).execute()
 
-    # Send welcome message to owner
     owner_tg_id = p.get("owner_telegram_user_id")
     owner_username = p.get("owner_telegram_username", "")
     if is_new:
@@ -619,6 +632,10 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     request_id = request_result.data[0]["id"]
 
+    # Look up requester's own profile ID (privacy: don't reveal username to owner)
+    requester_profile_id = get_requester_profile_id(user.username)
+    requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
+
     if is_first_in_queue:
         if state_result.data:
             supabase.table("user_state").update({
@@ -648,21 +665,19 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             reply_markup=interest_confirmation_markup(request_id),
         )
 
-        username_display = "@" + user.username if user.username else "User ID: " + str(user.id)
+        # Owner sees profile ID only — no Telegram username
         request_text = (
             "New Interest Request for your profile " + profile_id + "\n\n"
-            "Someone has expressed interest in your profile.\n\n"
-            "Request ID: " + str(request_id) + "\n"
-            "From: " + username_display + "\n\n"
+            + requester_profile_text + " has expressed interest in your profile.\n\n"
             "Please tap Approve or Decline below."
         )
 
+        # Admin sees full details including username
         admin_text = (
             "🔔 New Interest Request\n\n"
             "Profile: " + profile_id + "\n"
-            "From: " + username_display + "\n"
-            "Owner: @" + owner_username + "\n"
-            "Request ID: " + str(request_id)
+            "From: @" + str(user.username or user.id) + " (" + requester_profile_text + ")\n"
+            "Owner: @" + owner_username
         )
 
         sent_to_owner = False
@@ -720,7 +735,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             text=(
                 "🔢 Queue Update\n\n"
                 "Profile: " + profile_id + "\n"
-                "@" + str(user.username or user.id) + " added to queue at position " + str(queue_position)
+                "@" + str(user.username or user.id) + " (" + requester_profile_text + ") added to queue at position " + str(queue_position)
             ),
         )
 
