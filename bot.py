@@ -46,11 +46,14 @@ def profile_button_markup(profile_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def owner_request_markup(request_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
+def owner_request_markup(request_id: int, requester_has_photo: bool, owner_has_photo: bool) -> InlineKeyboardMarkup:
+    buttons = [
         InlineKeyboardButton("✅ Approve", callback_data="approve:" + str(request_id)),
-        InlineKeyboardButton("❌ Decline", callback_data="decline:" + str(request_id)),
-    ]])
+    ]
+    if requester_has_photo and owner_has_photo:
+        buttons.append(InlineKeyboardButton("📷 Approve & Share Photos", callback_data="approve_photo:" + str(request_id)))
+    buttons.append(InlineKeyboardButton("❌ Decline", callback_data="decline:" + str(request_id)))
+    return InlineKeyboardMarkup([buttons])
 
 
 def admin_request_markup(request_id: int) -> InlineKeyboardMarkup:
@@ -125,7 +128,7 @@ def send_telegram_message(chat_id: str, text: str, reply_markup: dict = None) ->
         return False
 
 
-# ── Helper: look up a requester's own profile ID ──────────────────────────────
+# ── Helper: look up a requester's own profile ─────────────────────────────────
 
 def get_requester_profile_id(username: str) -> str:
     if not username:
@@ -138,6 +141,20 @@ def get_requester_profile_id(username: str) -> str:
         .execute()
     )
     return result.data[0]["id"] if result.data else None
+
+
+def get_requester_profile(username: str) -> dict:
+    """Returns full profile dict for requester, or None."""
+    if not username:
+        return None
+    result = (
+        supabase.table("profiles")
+        .select("id, photo_url")
+        .eq("owner_telegram_username", username.lower())
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
 
 
 # ── Queue helper ───────────────────────────────────────────────────────────────
@@ -181,9 +198,11 @@ async def advance_queue(profile_id: str, context) -> None:
 
     owner_tg_id = None
     owner_username = ""
+    owner_photo_url = None
     if profile_result.data:
         owner_tg_id = profile_result.data[0].get("owner_telegram_user_id")
         owner_username = profile_result.data[0].get("owner_telegram_username", "")
+        owner_photo_url = profile_result.data[0].get("photo_url")
 
     await context.bot.send_message(
         chat_id=next_requester_id,
@@ -195,13 +214,20 @@ async def advance_queue(profile_id: str, context) -> None:
         reply_markup=interest_confirmation_markup(next_request_id),
     )
 
-    # Look up requester's profile ID (not username)
-    requester_profile_id = get_requester_profile_id(next_username)
+    requester_profile = get_requester_profile(next_username)
+    requester_profile_id = requester_profile["id"] if requester_profile else None
+    requester_photo_url = requester_profile["photo_url"] if requester_profile else None
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
+
+    requester_has_photo = bool(requester_photo_url)
+    owner_has_photo = bool(owner_photo_url)
+
+    photo_line = "\n📷 They have a photo to share." if requester_has_photo else "\n📷 They have not uploaded a photo."
 
     request_text = (
         "New Interest Request for your profile " + profile_id + "\n\n"
-        + requester_profile_text + " has expressed interest in your profile.\n\n"
+        + requester_profile_text + " has expressed interest in your profile."
+        + photo_line + "\n\n"
         "Please tap Approve or Decline below."
     )
 
@@ -218,7 +244,7 @@ async def advance_queue(profile_id: str, context) -> None:
             await context.bot.send_message(
                 chat_id=owner_tg_id,
                 text=request_text,
-                reply_markup=owner_request_markup(next_request_id),
+                reply_markup=owner_request_markup(next_request_id, requester_has_photo, owner_has_photo),
             )
             sent_to_owner = True
         except Exception as e:
@@ -481,7 +507,6 @@ async def my_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin only: /post_profile MTHAQ-001"""
     user = update.effective_user
     if not user or user.id != ADMIN_TELEGRAM_USER_ID:
         await update.message.reply_text("Not authorised.")
@@ -591,6 +616,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     profile = profile_result.data[0]
     owner_username = profile.get("owner_telegram_username", "")
     owner_tg_id = profile.get("owner_telegram_user_id")
+    owner_photo_url = profile.get("photo_url")
 
     active_check = (
         supabase.table("requests")
@@ -632,9 +658,13 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     request_id = request_result.data[0]["id"]
 
-    # Look up requester's own profile ID (privacy: don't reveal username to owner)
-    requester_profile_id = get_requester_profile_id(user.username)
+    requester_profile = get_requester_profile(user.username)
+    requester_profile_id = requester_profile["id"] if requester_profile else None
+    requester_photo_url = requester_profile["photo_url"] if requester_profile else None
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
+
+    requester_has_photo = bool(requester_photo_url)
+    owner_has_photo = bool(owner_photo_url)
 
     if is_first_in_queue:
         if state_result.data:
@@ -665,14 +695,15 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             reply_markup=interest_confirmation_markup(request_id),
         )
 
-        # Owner sees profile ID only — no Telegram username
+        photo_line = "\n📷 They have a photo to share." if requester_has_photo else "\n📷 They have not uploaded a photo."
+
         request_text = (
             "New Interest Request for your profile " + profile_id + "\n\n"
-            + requester_profile_text + " has expressed interest in your profile.\n\n"
+            + requester_profile_text + " has expressed interest in your profile."
+            + photo_line + "\n\n"
             "Please tap Approve or Decline below."
         )
 
-        # Admin sees full details including username
         admin_text = (
             "🔔 New Interest Request\n\n"
             "Profile: " + profile_id + "\n"
@@ -686,7 +717,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await context.bot.send_message(
                     chat_id=owner_tg_id,
                     text=request_text,
-                    reply_markup=owner_request_markup(request_id),
+                    reply_markup=owner_request_markup(request_id, requester_has_photo, owner_has_photo),
                 )
                 sent_to_owner = True
             except Exception as e:
@@ -809,6 +840,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     requester_id = req["requester_telegram_user_id"]
+    requester_username = req.get("requester_username", "")
     profile_id = req["profile_id"]
 
     profile_result = (
@@ -821,9 +853,11 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     owner_tg_id = None
     owner_username = ""
+    owner_photo_url = None
     if profile_result.data:
         owner_tg_id = profile_result.data[0].get("owner_telegram_user_id")
         owner_username = profile_result.data[0].get("owner_telegram_username", "")
+        owner_photo_url = profile_result.data[0].get("photo_url")
 
     is_admin = user.id == ADMIN_TELEGRAM_USER_ID
     is_owner = (owner_tg_id and user.id == owner_tg_id) or (user.username and user.username.lower() == owner_username.lower())
@@ -832,7 +866,9 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("Not authorised.", show_alert=True)
         return
 
-    if action == "approve":
+    if action in ("approve", "approve_photo"):
+        share_photos = (action == "approve_photo")
+
         supabase.table("requests").update({
             "status": "approved",
             "decided_at": datetime.now(timezone.utc).isoformat(),
@@ -872,14 +908,37 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await context.bot.send_message(chat_id=requester_id, text=contact_msg)
 
+        # Send photos if approve_photo
+        if share_photos:
+            requester_profile = get_requester_profile(requester_username)
+            requester_photo_url = requester_profile["photo_url"] if requester_profile else None
+
+            if requester_photo_url and owner_photo_url:
+                try:
+                    # Send owner's photo to requester
+                    await context.bot.send_photo(
+                        chat_id=requester_id,
+                        photo=owner_photo_url,
+                        caption="📷 Photo shared by profile " + profile_id,
+                    )
+                    # Send requester's photo to owner
+                    if owner_tg_id:
+                        await context.bot.send_photo(
+                            chat_id=owner_tg_id,
+                            photo=requester_photo_url,
+                            caption="📷 Photo shared by the person interested in your profile",
+                        )
+                except Exception as e:
+                    logging.warning("Could not send photos: " + str(e))
+
         await context.bot.send_message(
             chat_id=ADMIN_TELEGRAM_USER_ID,
-            text="✅ Approved: profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username", requester_id)) + " by @" + str(user.username or user.id),
+            text="✅ Approved" + (" with photos" if share_photos else "") + ": profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username", requester_id)) + " by @" + str(user.username or user.id),
         )
 
-        await query.edit_message_text("✅ You approved request " + str(request_id) + " for profile " + profile_id + ".")
+        await query.edit_message_text("✅ You approved request " + str(request_id) + " for profile " + profile_id + ("with photos shared." if share_photos else "."))
 
-        # Decline all remaining queue for this profile
+        # Decline all remaining queue
         remaining = (
             supabase.table("requests")
             .select("*")
@@ -1037,7 +1096,7 @@ def main() -> None:
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CommandHandler("my_request", my_request))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
-    app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|decline|withdraw):"))
+    app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw):"))
 
     print("✅ Mithaq bot is running...")
     app.run_polling()
