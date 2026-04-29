@@ -144,7 +144,6 @@ def get_requester_profile_id(username: str) -> str:
 
 
 def get_requester_profile(username: str) -> dict:
-    """Returns full profile dict for requester, or None."""
     if not username:
         return None
     result = (
@@ -345,6 +344,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user = update.effective_user
     username = user.username.lower() if user.username else ""
+
+    # Check for affiliate referral code
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith("aff_"):
+            affiliate_code = arg[4:]
+            try:
+                aff_result = (
+                    supabase.table("affiliates")
+                    .select("code")
+                    .eq("code", affiliate_code)
+                    .limit(1)
+                    .execute()
+                )
+                if aff_result.data:
+                    existing = (
+                        supabase.table("referrals")
+                        .select("id")
+                        .eq("telegram_user_id", user.id)
+                        .limit(1)
+                        .execute()
+                    )
+                    if not existing.data:
+                        supabase.table("referrals").insert({
+                            "affiliate_code": affiliate_code,
+                            "telegram_user_id": user.id,
+                            "telegram_username": username,
+                        }).execute()
+                        logging.info(f"Referral recorded: {user.id} via {affiliate_code}")
+            except Exception as e:
+                logging.warning("Could not record referral: " + str(e))
 
     if username:
         result = (
@@ -908,20 +938,17 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await context.bot.send_message(chat_id=requester_id, text=contact_msg)
 
-        # Send photos if approve_photo
         if share_photos:
             requester_profile = get_requester_profile(requester_username)
             requester_photo_url = requester_profile["photo_url"] if requester_profile else None
 
             if requester_photo_url and owner_photo_url:
                 try:
-                    # Send owner's photo to requester
                     await context.bot.send_photo(
                         chat_id=requester_id,
                         photo=owner_photo_url,
                         caption="📷 Photo shared by profile " + profile_id,
                     )
-                    # Send requester's photo to owner
                     if owner_tg_id:
                         await context.bot.send_photo(
                             chat_id=owner_tg_id,
@@ -936,9 +963,8 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text="✅ Approved" + (" with photos" if share_photos else "") + ": profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username", requester_id)) + " by @" + str(user.username or user.id),
         )
 
-        await query.edit_message_text("✅ You approved request " + str(request_id) + " for profile " + profile_id + ("with photos shared." if share_photos else "."))
+        await query.edit_message_text("✅ You approved request " + str(request_id) + " for profile " + profile_id + (" with photos shared." if share_photos else "."))
 
-        # Decline all remaining queue
         remaining = (
             supabase.table("requests")
             .select("*")
@@ -1074,6 +1100,131 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def add_affiliate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /add_affiliate code name\nExample: /add_affiliate ahmed123 Ahmed Ali")
+        return
+
+    code = context.args[0].strip().lower()
+    name = " ".join(context.args[1:]).strip()
+
+    try:
+        supabase.table("affiliates").insert({
+            "code": code,
+            "name": name,
+        }).execute()
+
+        bot_username = (await context.bot.get_me()).username
+        link = f"https://t.me/{bot_username}?start=aff_{code}"
+
+        await update.message.reply_text(
+            "✅ Affiliate created!\n\n"
+            "Name: " + name + "\n"
+            "Code: " + code + "\n"
+            "Link: " + link
+        )
+    except Exception as e:
+        await update.message.reply_text("❌ Error: " + str(e))
+
+
+async def affiliate_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    affiliates = supabase.table("affiliates").select("*").order("created_at", desc=False).execute()
+
+    if not affiliates.data:
+        await update.message.reply_text("No affiliates yet.")
+        return
+
+    lines = ["📊 Affiliate Stats\n"]
+    for aff in affiliates.data:
+        code = aff["code"]
+        name = aff["name"]
+
+        referrals = (
+            supabase.table("referrals")
+            .select("id", count="exact")
+            .eq("affiliate_code", code)
+            .execute()
+        )
+        conversions = (
+            supabase.table("referrals")
+            .select("id", count="exact")
+            .eq("affiliate_code", code)
+            .eq("converted", True)
+            .execute()
+        )
+
+        lines.append(
+            f"👤 {name} ({code})\n"
+            f"   Referrals: {referrals.count} | Conversions: {conversions.count}\n"
+        )
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def convert_referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /convert @username or /convert telegram_user_id")
+        return
+
+    target = context.args[0].strip().replace("@", "").lower()
+
+    try:
+        result = (
+            supabase.table("referrals")
+            .select("*")
+            .eq("telegram_username", target)
+            .limit(1)
+            .execute()
+        )
+
+        if not result.data and target.isdigit():
+            result = (
+                supabase.table("referrals")
+                .select("*")
+                .eq("telegram_user_id", int(target))
+                .limit(1)
+                .execute()
+            )
+
+        if not result.data:
+            await update.message.reply_text("No referral found for " + target)
+            return
+
+        referral = result.data[0]
+
+        if referral.get("converted"):
+            await update.message.reply_text("This referral is already marked as converted.")
+            return
+
+        supabase.table("referrals").update({
+            "converted": True,
+            "converted_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", referral["id"]).execute()
+
+        await update.message.reply_text(
+            "✅ Referral marked as converted!\n\n"
+            "User: @" + str(referral.get("telegram_username", referral["telegram_user_id"])) + "\n"
+            "Affiliate: " + referral["affiliate_code"]
+        )
+    except Exception as e:
+        await update.message.reply_text("❌ Error: " + str(e))
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def run_flask():
@@ -1095,6 +1246,9 @@ def main() -> None:
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CommandHandler("my_request", my_request))
+    app.add_handler(CommandHandler("add_affiliate", add_affiliate))
+    app.add_handler(CommandHandler("affiliate_stats", affiliate_stats))
+    app.add_handler(CommandHandler("convert", convert_referral))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw):"))
 
