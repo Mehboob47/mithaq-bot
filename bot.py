@@ -405,6 +405,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         if result.data:
             profile = result.data[0]
+
+            # Register owner_telegram_user_id if not yet set
             if not profile.get("owner_telegram_user_id"):
                 supabase.table("profiles").update({
                     "owner_telegram_user_id": user.id
@@ -414,7 +416,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     text="Owner registered: " + profile["id"] + " @" + user.username + " ID " + str(user.id),
                 )
 
-            # Send profile management message with pause/resume button
+            # Always show profile status with pause/resume button
             profile_id = profile["id"]
             is_paused = profile.get("is_paused", False)
             status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
@@ -903,7 +905,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 chat_id=ADMIN_TELEGRAM_USER_ID,
                 text="▶️ Profile " + profile_id + " resumed by owner."
             )
-            # Advance queue if there are pending requests
             await advance_queue(profile_id, context)
         return
 
@@ -1217,7 +1218,6 @@ async def add_affiliate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "name": name,
         }).execute()
 
-        bot_username = (await context.bot.get_me()).username
         link = f"https://mithaqmarriage.com?ref={code}"
 
         await update.message.reply_text(
