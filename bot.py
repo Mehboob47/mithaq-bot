@@ -75,6 +75,18 @@ def queue_confirmation_markup(request_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def pause_markup(profile_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⏸ Pause Profile", callback_data="pause:" + profile_id)]]
+    )
+
+
+def resume_markup(profile_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("▶️ Resume Profile", callback_data="resume:" + profile_id)]]
+    )
+
+
 # ── Profile text builder ───────────────────────────────────────────────────────
 
 def build_profile_text(p: dict) -> str:
@@ -322,11 +334,18 @@ def post_new_profile():
             "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
             "📌 You are in full control — nothing is shared without your approval\n"
             "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
+            "📌 You can pause your profile at any time using the button below.\n\n"
             "Questions? Contact @MithaqAdmin 🤲\n\n"
             "May Allah make it easy for you 🤲"
         )
         if owner_tg_id:
-            send_telegram_message(str(owner_tg_id), welcome_msg)
+            send_telegram_message(str(owner_tg_id), welcome_msg,
+                reply_markup={
+                    "inline_keyboard": [[
+                        {"text": "⏸ Pause Profile", "callback_data": "pause:" + profile_id}
+                    ]]
+                }
+            )
         else:
             send_telegram_message(
                 str(ADMIN_TELEGRAM_USER_ID),
@@ -379,7 +398,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if username:
         result = (
             supabase.table("profiles")
-            .select("id, owner_telegram_user_id")
+            .select("id, owner_telegram_user_id, is_paused")
             .eq("owner_telegram_username", username)
             .limit(1)
             .execute()
@@ -394,6 +413,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=ADMIN_TELEGRAM_USER_ID,
                     text="Owner registered: " + profile["id"] + " @" + user.username + " ID " + str(user.id),
                 )
+
+            # Send profile management message with pause/resume button
+            profile_id = profile["id"]
+            is_paused = profile.get("is_paused", False)
+            status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
+            await update.message.reply_text(
+                "📋 Your profile: *" + profile_id + "*\n\n" + status_text,
+                parse_mode="Markdown",
+                reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
+            )
 
     await update.message.reply_text(
         "Assalamu alaikum! Welcome to Mithaq Marriage 🌸\n\n"
@@ -587,13 +616,18 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
             "📌 You are in full control — nothing is shared without your approval\n"
             "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
+            "📌 You can pause your profile at any time using the button below.\n\n"
             "Questions? Contact @MithaqAdmin 🤲\n\n"
             "May Allah make it easy for you 🤲"
         )
         sent = False
         if owner_tg_id:
             try:
-                await context.bot.send_message(chat_id=owner_tg_id, text=welcome_msg)
+                await context.bot.send_message(
+                    chat_id=owner_tg_id,
+                    text=welcome_msg,
+                    reply_markup=pause_markup(profile_id),
+                )
                 sent = True
             except Exception as e:
                 logging.warning("Could not send welcome to owner: " + str(e))
@@ -644,6 +678,15 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     profile = profile_result.data[0]
+
+    # Check if profile is paused
+    if profile.get("is_paused"):
+        await query.answer(
+            "This profile is temporarily paused. Please check back later.",
+            show_alert=True,
+        )
+        return
+
     owner_username = profile.get("owner_telegram_username", "")
     owner_tg_id = profile.get("owner_telegram_user_id")
     owner_photo_url = profile.get("photo_url")
@@ -811,7 +854,60 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
 
     action, request_id_str = query.data.split(":", 1)
-    request_id = int(request_id_str)
+    request_id_or_profile = request_id_str
+
+    # Handle pause/resume
+    if action in ("pause", "resume"):
+        profile_id = request_id_or_profile
+
+        profile_result = (
+            supabase.table("profiles")
+            .select("*")
+            .eq("id", profile_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not profile_result.data:
+            await query.edit_message_text("Profile not found.")
+            return
+
+        profile = profile_result.data[0]
+        owner_tg_id = profile.get("owner_telegram_user_id")
+        is_admin = user.id == ADMIN_TELEGRAM_USER_ID
+        is_owner = (owner_tg_id and user.id == owner_tg_id)
+
+        if not is_admin and not is_owner:
+            await query.answer("Not authorised.", show_alert=True)
+            return
+
+        if action == "pause":
+            supabase.table("profiles").update({"is_paused": True}).eq("id", profile_id).execute()
+            await query.edit_message_reply_markup(reply_markup=resume_markup(profile_id))
+            await context.bot.send_message(
+                chat_id=user.id,
+                text="⏸ Your profile " + profile_id + " has been paused. No new interest requests will be accepted until you resume. 🤲"
+            )
+            await context.bot.send_message(
+                chat_id=ADMIN_TELEGRAM_USER_ID,
+                text="⏸ Profile " + profile_id + " paused by owner."
+            )
+        elif action == "resume":
+            supabase.table("profiles").update({"is_paused": False}).eq("id", profile_id).execute()
+            await query.edit_message_reply_markup(reply_markup=pause_markup(profile_id))
+            await context.bot.send_message(
+                chat_id=user.id,
+                text="▶️ Your profile " + profile_id + " has been resumed. You will now receive interest requests again. 🤲"
+            )
+            await context.bot.send_message(
+                chat_id=ADMIN_TELEGRAM_USER_ID,
+                text="▶️ Profile " + profile_id + " resumed by owner."
+            )
+            # Advance queue if there are pending requests
+            await advance_queue(profile_id, context)
+        return
+
+    request_id = int(request_id_or_profile)
 
     if action == "withdraw":
         req_result = (
@@ -1074,6 +1170,7 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     total_profiles = supabase.table("profiles").select("id", count="exact").execute()
     active_profiles = supabase.table("profiles").select("id", count="exact").eq("is_active", True).execute()
+    paused_profiles = supabase.table("profiles").select("id", count="exact").eq("is_paused", True).execute()
     pending = supabase.table("requests").select("id", count="exact").eq("status", "pending").execute()
     approved = supabase.table("requests").select("id", count="exact").eq("status", "approved").execute()
     declined = supabase.table("requests").select("id", count="exact").eq("status", "declined").execute()
@@ -1085,6 +1182,7 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📊 Mithaq Dashboard\n",
         "👥 Total profiles: " + str(total_profiles.count),
         "✅ Active profiles: " + str(active_profiles.count),
+        "⏸ Paused profiles: " + str(paused_profiles.count),
         "",
         "🔔 Pending requests: " + str(pending.count),
         "✅ Approved: " + str(approved.count),
@@ -1120,7 +1218,7 @@ async def add_affiliate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         }).execute()
 
         bot_username = (await context.bot.get_me()).username
-        link = f"https://t.me/{bot_username}?start=aff_{code}"
+        link = f"https://mithaqmarriage.com?ref={code}"
 
         await update.message.reply_text(
             "✅ Affiliate created!\n\n"
@@ -1250,7 +1348,7 @@ def main() -> None:
     app.add_handler(CommandHandler("affiliate_stats", affiliate_stats))
     app.add_handler(CommandHandler("convert", convert_referral))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
-    app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw):"))
+    app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw|pause|resume):"))
 
     print("✅ Mithaq bot is running...")
     app.run_polling()
