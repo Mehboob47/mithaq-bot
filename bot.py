@@ -22,7 +22,7 @@ from telegram.ext import (
 load_dotenv()
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(name)s - %(levelname)t - %(message)s",
     level=logging.INFO,
 )
 
@@ -42,7 +42,7 @@ flask_app = Flask(__name__)
 
 def profile_button_markup(profile_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("💍 Express Interest", callback_data="interest:" + profile_id)]]
+        [[InlineKeyboardButton("📩 Express Interest", callback_data="interest:" + profile_id)]]
     )
 
 
@@ -310,7 +310,7 @@ def post_new_profile():
 
     reply_markup = {
         "inline_keyboard": [[
-            {"text": "💍 Express Interest", "callback_data": "interest:" + profile_id}
+            {"text": "📩 Express Interest", "callback_data": "interest:" + profile_id}
         ]]
     }
 
@@ -364,7 +364,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     username = user.username.lower() if user.username else ""
 
-    # Check for affiliate referral code
     if context.args:
         arg = context.args[0]
         if arg.startswith("aff_"):
@@ -428,7 +427,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Assalamu alaikum! Welcome to Mithaq Marriage 🌸\n\n"
         "Here's how it works:\n\n"
         "1️⃣ Browse profiles in the channel\n"
-        "2️⃣ Tap 💍 Express Interest on any profile you like\n"
+        "2️⃣ Tap 📩 Express Interest on any profile you like\n"
         "3️⃣ The profile owner will be notified and will Approve or Decline\n"
         "4️⃣ If approved, you'll receive their contact details here\n\n"
         "📌 You can only have one active request at a time\n"
@@ -610,7 +609,7 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Assalamu alaikum! 🌸\n\n"
             "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live in the channel!\n\n"
             "Here's what happens next:\n\n"
-            "1️⃣ Channel members can tap Express Interest on your profile\n"
+            "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
             "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
             "3️⃣ If you Approve, the person receives your contact details\n"
             "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
@@ -699,7 +698,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     profile = profile_result.data[0]
 
-    # Check if profile is paused
     if profile.get("is_paused"):
         await query.answer(
             "This profile is temporarily paused. Please check back later.",
@@ -876,7 +874,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     action, request_id_str = query.data.split(":", 1)
     request_id_or_profile = request_id_str
 
-    # Handle pause/resume
     if action in ("pause", "resume"):
         profile_id = request_id_or_profile
 
