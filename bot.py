@@ -406,7 +406,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if result.data:
             profile = result.data[0]
 
-            # Register owner_telegram_user_id if not yet set
             if not profile.get("owner_telegram_user_id"):
                 supabase.table("profiles").update({
                     "owner_telegram_user_id": user.id
@@ -416,7 +415,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     text="Owner registered: " + profile["id"] + " @" + user.username + " ID " + str(user.id),
                 )
 
-            # Always show profile status with pause/resume button
             profile_id = profile["id"]
             is_paused = profile.get("is_paused", False)
             status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
@@ -649,6 +647,26 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     _, profile_id = query.data.split(":", 1)
+
+    # Check if user is a member of the channel
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user.id)
+        if member.status in ("left", "kicked", "banned"):
+            await query.answer(
+                "You must be a Mithaq member to express interest.",
+                show_alert=True,
+            )
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    "To express interest in profiles, you must first submit your own profile to Mithaq.\n\n"
+                    "📝 Submit your profile here: mithaqmarriage.com\n\n"
+                    "Once your profile is live, you'll be able to express interest in others insha'Allah. 🤲"
+                )
+            )
+            return
+    except Exception as e:
+        logging.warning("Could not check channel membership: " + str(e))
 
     state_result = (
         supabase.table("user_state")
