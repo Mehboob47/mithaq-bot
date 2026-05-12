@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import threading
@@ -372,6 +373,7 @@ def post_new_profile():
             "📌 You are in full control — nothing is shared without your approval\n"
             "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
             "📌 You can pause your profile at any time using the button below.\n\n"
+            "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
             "Questions? Contact @MithaqAdmin 🤲\n\n"
             "May Allah make it easy for you 🤲"
         )
@@ -464,6 +466,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "📌 You are in full control — nothing is shared without your approval\n"
                     "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
                     "📌 You can pause your profile at any time using the button below.\n\n"
+                    "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
                     "Questions? Contact @MithaqAdmin 🤲\n\n"
                     "May Allah make it easy for you 🤲"
                 )
@@ -474,7 +477,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
                 await update.message.reply_text(
-                    "📋 Your profile: *" + profile_id + "*\n\n" + status_text,
+                    "📋 Your profile: *" + profile_id + "*\n\n" + status_text + "\n\n📌 If you are not receiving notifications, please type /start again.",
                     parse_mode="Markdown",
                     reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
                 )
@@ -490,7 +493,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📌 You can only have one active request at a time\n"
         "📌 If declined, you're free to express interest in another profile\n"
         "📌 You can withdraw your interest at any time — just send /withdraw\n"
-        "📌 To check your request status, send /my_request\n\n"
+        "📌 To check your request status, send /my_request\n"
+        "📌 If you ever stop receiving notifications, simply type /start again\n\n"
         "📢 Browse profiles here: https://t.me/+ilWsgu9hLb02ODQ0\n\n"
         "Questions or issues? Contact @MithaqAdmin\n\n"
         "JazakAllahu khayran — may Allah make it easy for you 🤲"
@@ -673,6 +677,7 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "📌 You are in full control — nothing is shared without your approval\n"
             "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
             "📌 You can pause your profile at any time using the button below.\n\n"
+            "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
             "Questions? Contact @MithaqAdmin 🤲\n\n"
             "May Allah make it easy for you 🤲"
         )
@@ -701,7 +706,7 @@ async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Not authorised.")
         return
 
-    await update.message.reply_text("⏳ Reposting all active profiles with updated format. This may take a moment...")
+    await update.message.reply_text("⏳ Reposting all active profiles with updated format. This will take a few minutes...")
 
     result = (
         supabase.table("profiles")
@@ -729,9 +734,11 @@ async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             success_count += 1
             logging.info(f"Reposted {profile_id}")
+            await asyncio.sleep(2)
         except Exception as e:
             fail_count += 1
             logging.warning(f"Failed to repost {profile_id}: {str(e)}")
+            await asyncio.sleep(3)
 
     await update.message.reply_text(
         f"✅ Repost complete.\n\n"
