@@ -404,24 +404,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         if result.data:
             profile = result.data[0]
+            profile_id = profile["id"]
+            is_paused = profile.get("is_paused", False)
 
+            # Always re-attempt registration in case they started bot early
             if not profile.get("owner_telegram_user_id"):
                 supabase.table("profiles").update({
                     "owner_telegram_user_id": user.id
-                }).eq("id", profile["id"]).execute()
+                }).eq("id", profile_id).execute()
+                logging.info(f"Owner registered on start: {profile_id} @{username} ID {user.id}")
                 await context.bot.send_message(
                     chat_id=ADMIN_TELEGRAM_USER_ID,
-                    text="Owner registered: " + profile["id"] + " @" + user.username + " ID " + str(user.id),
+                    text="✅ Owner registered: " + profile_id + " @" + username + " ID " + str(user.id),
                 )
-
-            profile_id = profile["id"]
-            is_paused = profile.get("is_paused", False)
-            status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
-            await update.message.reply_text(
-                "📋 Your profile: *" + profile_id + "*\n\n" + status_text,
-                parse_mode="Markdown",
-                reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
-            )
+                # Send welcome message now that they are registered
+                welcome_msg = (
+                    "Assalamu alaikum! 🌸\n\n"
+                    "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live in the channel!\n\n"
+                    "Here's what happens next:\n\n"
+                    "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
+                    "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
+                    "3️⃣ If you Approve, the person receives your contact details\n"
+                    "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
+                    "📌 You are in full control — nothing is shared without your approval\n"
+                    "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
+                    "📌 You can pause your profile at any time using the button below.\n\n"
+                    "Questions? Contact @MithaqAdmin 🤲\n\n"
+                    "May Allah make it easy for you 🤲"
+                )
+                await update.message.reply_text(
+                    welcome_msg,
+                    reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
+                )
+            else:
+                # Already registered — just show profile status
+                status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
+                await update.message.reply_text(
+                    "📋 Your profile: *" + profile_id + "*\n\n" + status_text,
+                    parse_mode="Markdown",
+                    reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
+                )
+            return
 
     await update.message.reply_text(
         "Assalamu alaikum! Welcome to Mithaq Marriage 🌸\n\n"
