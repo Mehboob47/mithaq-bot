@@ -206,9 +206,42 @@ def get_requester_profile(username: str) -> dict:
     return result.data[0] if result.data else None
 
 
+# ── Repost profile helper ──────────────────────────────────────────────────────
+
+async def repost_profile(profile_id: str, context) -> None:
+    """Repost a profile to the channel — called after decline or withdraw when queue is empty."""
+    try:
+        profile_result = (
+            supabase.table("profiles")
+            .select("*")
+            .eq("id", profile_id)
+            .eq("is_active", True)
+            .eq("is_paused", False)
+            .limit(1)
+            .execute()
+        )
+
+        if not profile_result.data:
+            logging.info(f"Skipping repost for {profile_id} — not active or paused")
+            return
+
+        p = profile_result.data[0]
+        text = build_profile_text(p)
+
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=text,
+            reply_markup=profile_button_markup(profile_id),
+        )
+        logging.info(f"✅ Reposted {profile_id} to channel after becoming available")
+
+    except Exception as e:
+        logging.warning(f"Could not repost {profile_id}: {str(e)}")
+
+
 # ── Queue helper ───────────────────────────────────────────────────────────────
 
-async def advance_queue(profile_id: str, context) -> None:
+async def advance_queue(profile_id: str, context, repost_if_empty: bool = False) -> None:
     next_result = (
         supabase.table("requests")
         .select("*")
@@ -221,6 +254,9 @@ async def advance_queue(profile_id: str, context) -> None:
     )
 
     if not next_result.data:
+        # Queue is empty — repost if requested
+        if repost_if_empty:
+            await repost_profile(profile_id, context)
         return
 
     next_req = next_result.data[0]
@@ -483,6 +519,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             return
 
+    if not username:
+        await update.message.reply_text(
+            "Assalamu alaikum! 🌸\n\n"
+            "⚠️ We noticed you don't have a Telegram username set.\n\n"
+            "To use Mithaq you need a Telegram username.\n\n"
+            "📱 Go to: Settings → tap your name → Username → set one\n\n"
+            "Once done, type /start again and you'll be all set insha'Allah. 🤲"
+        )
+        return
+
     await update.message.reply_text(
         "Assalamu alaikum! Welcome to Mithaq Marriage 🌸\n\n"
         "Here's how it works:\n\n"
@@ -564,7 +610,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
     if was_active:
-        await advance_queue(profile_id, context)
+        await advance_queue(profile_id, context, repost_if_empty=True)
 
 
 async def my_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -713,6 +759,7 @@ async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         .select("*")
         .eq("is_active", True)
         .eq("is_paused", False)
+        .order("id", desc=False)
         .execute()
     )
 
@@ -757,24 +804,67 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     _, profile_id = query.data.split(":", 1)
 
+    # Check if user has a Telegram username
+    if not user.username:
+        await query.answer(
+            "You need a Telegram username to use Mithaq. Go to Settings → Username to set one.",
+            show_alert=True,
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    "To use Mithaq you need a Telegram username.\n\n"
+                    "📱 Go to: Settings → tap your name → Username → set one\n\n"
+                    "Once done, type /start and then you can express interest in profiles insha'Allah. 🤲"
+                )
+            )
+        except Exception:
+            pass
+        return
+
+    # Check if user is a member of the channel
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user.id)
         if member.status in ("left", "kicked", "banned"):
             await query.answer(
-                "You must be a Mithaq member to express interest.",
+                "You must submit a profile to Mithaq before expressing interest.",
                 show_alert=True,
             )
+            try:
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=(
+                        "To express interest in profiles, you must first submit your own profile to Mithaq.\n\n"
+                        "📝 Submit your profile here: mithaqmarriage.com\n\n"
+                        "Once your profile is live, you'll be able to express interest in others insha'Allah. 🤲"
+                    )
+                )
+            except Exception:
+                pass
+            return
+    except Exception as e:
+        logging.warning("Could not check channel membership: " + str(e))
+
+    # Check if user has a Mithaq profile
+    requester_profile = get_requester_profile(user.username)
+    if not requester_profile:
+        await query.answer(
+            "You need a Mithaq profile to express interest. Visit mithaqmarriage.com to submit yours.",
+            show_alert=True,
+        )
+        try:
             await context.bot.send_message(
                 chat_id=user.id,
                 text=(
-                    "To express interest in profiles, you must first submit your own profile to Mithaq.\n\n"
+                    "You don't have a Mithaq profile yet.\n\n"
                     "📝 Submit your profile here: mithaqmarriage.com\n\n"
                     "Once your profile is live, you'll be able to express interest in others insha'Allah. 🤲"
                 )
             )
-            return
-    except Exception as e:
-        logging.warning("Could not check channel membership: " + str(e))
+        except Exception:
+            pass
+        return
 
     state_result = (
         supabase.table("user_state")
@@ -858,7 +948,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     request_id = request_result.data[0]["id"]
 
-    requester_profile = get_requester_profile(user.username)
     requester_profile_id = requester_profile["id"] if requester_profile else None
     requester_photo_url = requester_profile["photo_url"] if requester_profile else None
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
@@ -1069,7 +1158,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         if was_active:
-            await advance_queue(profile_id, context)
+            await advance_queue(profile_id, context, repost_if_empty=True)
         return
 
     req_result = (
@@ -1237,7 +1326,8 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await query.edit_message_text("❌ You declined request " + str(request_id) + " for profile " + profile_id + ".")
 
-        await advance_queue(profile_id, context)
+        # Advance queue — repost if queue is now empty
+        await advance_queue(profile_id, context, repost_if_empty=True)
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
