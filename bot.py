@@ -22,7 +22,7 @@ from telegram.ext import (
 load_dotenv()
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)t - %(message)s",
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
@@ -328,7 +328,7 @@ def post_new_profile():
             "Assalamu alaikum! 🌸\n\n"
             "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live in the channel!\n\n"
             "Here's what happens next:\n\n"
-            "1️⃣ Channel members can tap Express Interest on your profile\n"
+            "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
             "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
             "3️⃣ If you Approve, the person receives your contact details\n"
             "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
@@ -647,7 +647,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     _, profile_id = query.data.split(":", 1)
 
-    # Check if user is a member of the channel
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user.id)
         if member.status in ("left", "kicked", "banned"):
@@ -1338,6 +1337,90 @@ async def convert_referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("❌ Error: " + str(e))
 
 
+async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /resend_requests MTHAQ-001")
+        return
+
+    profile_id = context.args[0].strip()
+
+    profile_result = (
+        supabase.table("profiles")
+        .select("*")
+        .eq("id", profile_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not profile_result.data:
+        await update.message.reply_text("Profile " + profile_id + " not found.")
+        return
+
+    profile = profile_result.data[0]
+    owner_tg_id = profile.get("owner_telegram_user_id")
+    owner_photo_url = profile.get("photo_url")
+
+    if not owner_tg_id:
+        await update.message.reply_text(
+            "Owner of " + profile_id + " is not registered yet — they need to start the bot first."
+        )
+        return
+
+    pending_requests = (
+        supabase.table("requests")
+        .select("*")
+        .eq("profile_id", profile_id)
+        .eq("status", "pending")
+        .eq("is_active_request", True)
+        .limit(1)
+        .execute()
+    )
+
+    if not pending_requests.data:
+        await update.message.reply_text("No active pending requests for " + profile_id + ".")
+        return
+
+    req = pending_requests.data[0]
+    request_id = req["id"]
+    requester_username = req.get("requester_username", "")
+
+    requester_profile = get_requester_profile(requester_username)
+    requester_profile_id = requester_profile["id"] if requester_profile else None
+    requester_photo_url = requester_profile["photo_url"] if requester_profile else None
+    requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
+
+    requester_has_photo = bool(requester_photo_url)
+    owner_has_photo = bool(owner_photo_url)
+
+    photo_line = "\n📷 They have a photo to share." if requester_has_photo else "\n📷 They have not uploaded a photo."
+
+    request_text = (
+        "New Interest Request for your profile " + profile_id + "\n\n"
+        + requester_profile_text + " has expressed interest in your profile."
+        + photo_line + "\n\n"
+        "Please tap Approve or Decline below."
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=owner_tg_id,
+            text=request_text,
+            reply_markup=owner_request_markup(request_id, requester_has_photo, owner_has_photo),
+        )
+        await update.message.reply_text(
+            "✅ Request resent to owner of " + profile_id + " successfully."
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "❌ Could not send to owner: " + str(e)
+        )
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def run_flask():
@@ -1362,6 +1445,7 @@ def main() -> None:
     app.add_handler(CommandHandler("add_affiliate", add_affiliate))
     app.add_handler(CommandHandler("affiliate_stats", affiliate_stats))
     app.add_handler(CommandHandler("convert", convert_referral))
+    app.add_handler(CommandHandler("resend_requests", resend_requests))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw|pause|resume):"))
 
