@@ -96,24 +96,61 @@ def build_profile_text(p: dict) -> str:
         if lines and "BROTHER" not in lines[0] and "SISTER" not in lines[0]:
             lines = lines[1:]
         return "\n".join(lines)
-    lines = [
-        f"📋 *Profile {p['id']}*",
-        f"👤 {p['display_name']}",
-        f"📍 {p.get('city', '')}, {p.get('country', '')}".strip(", "),
-        "",
-        f"🕌 Deen: {p.get('deen', 'N/A')}",
-        f"🙏 Prayer: {p.get('prayer', 'N/A')}",
-        f"📚 Madhab: {p.get('madhab', 'N/A')}",
-        "",
-        f"💼 Occupation: {p.get('occupation', 'N/A')}",
-        f"🎓 Education: {p.get('education', 'N/A')}",
-        f"💍 Marital Status: {p.get('marital_status', 'N/A')}",
-        f"👶 Children: {p.get('children', 'N/A')}",
-        "",
-        f"📝 About: {p.get('about', 'N/A')}",
-        "",
-        f"🔍 Looking for: {p.get('looking_for', 'N/A')}",
-    ]
+
+    gender = p.get("gender", "").lower()
+    gender_emoji = "🟣" if ("female" in gender or "sister" in gender) else "🔵"
+    gender_label = "SISTER" if ("female" in gender or "sister" in gender) else "BROTHER"
+
+    lines = []
+
+    lines.append(f"{gender_emoji} {gender_label} — {p['id']}")
+    lines.append(f"👤 {p.get('display_name', '')}")
+    if p.get('city') or p.get('country'):
+        lines.append(f"📍 {', '.join(filter(None, [p.get('city'), p.get('country')]))}")
+
+    lines.append("")
+
+    if p.get('deen'):             lines.append(f"🕌 Deen: {p['deen']}")
+    if p.get('prayer'):           lines.append(f"🙏 Prayer: {p['prayer']}")
+    if p.get('madhab'):           lines.append(f"📚 Madhab: {p['madhab']}")
+    if p.get('islamic_classes'):  lines.append(f"📖 Islamic classes: {p['islamic_classes']}")
+    if p.get('revert'):           lines.append(f"🔄 Revert: {p['revert']}")
+
+    lines.append("")
+
+    if p.get('occupation'):       lines.append(f"💼 Occupation: {p['occupation']}")
+    if p.get('education'):        lines.append(f"🎓 Education: {p['education']}")
+    if p.get('languages'):        lines.append(f"🗣️ Languages: {p['languages']}")
+    if p.get('nationality'):      lines.append(f"🌍 Nationality: {p['nationality']}")
+    if p.get('ethnicity'):        lines.append(f"🌺 Ethnicity: {p['ethnicity']}")
+    if p.get('marital_status'):   lines.append(f"💍 Marital Status: {p['marital_status']}")
+    if p.get('children'):         lines.append(f"👶 Children: {p['children']}")
+
+    lines.append("")
+
+    if p.get('about'):
+        lines.append("✨ About:")
+        lines.append(p['about'])
+
+    lines.append("")
+
+    if p.get('personality_traits'): lines.append(f"🌱 Personality Traits: {p['personality_traits']}")
+    if p.get('interests'):          lines.append(f"🎯 Interests: {p['interests']}")
+    if p.get('goals'):              lines.append(f"🏡 Goals: {p['goals']}")
+
+    lines.append("")
+
+    if p.get('looking_for'):      lines.append(f"🔍 Looking for: {p['looking_for']}")
+
+    lines.append("")
+
+    if p.get('spouse_deen_level'): lines.append(f"❤️ Spouse Deen Level: {p['spouse_deen_level']}")
+    if p.get('marriage_dynamic'):  lines.append(f"🤝 Marriage Dynamic: {p['marriage_dynamic']}")
+
+    if p.get('additional'):
+        lines.append("")
+        lines.append(f"📋 Additional: {p['additional']}")
+
     return "\n".join(lines)
 
 
@@ -407,7 +444,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             profile_id = profile["id"]
             is_paused = profile.get("is_paused", False)
 
-            # Always re-attempt registration in case they started bot early
             if not profile.get("owner_telegram_user_id"):
                 supabase.table("profiles").update({
                     "owner_telegram_user_id": user.id
@@ -417,7 +453,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=ADMIN_TELEGRAM_USER_ID,
                     text="✅ Owner registered: " + profile_id + " @" + username + " ID " + str(user.id),
                 )
-                # Send welcome message now that they are registered
                 welcome_msg = (
                     "Assalamu alaikum! 🌸\n\n"
                     "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live in the channel!\n\n"
@@ -437,7 +472,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
                 )
             else:
-                # Already registered — just show profile status
                 status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
                 await update.message.reply_text(
                     "📋 Your profile: *" + profile_id + "*\n\n" + status_text,
@@ -659,6 +693,52 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 text="Could not send welcome to owner of " + profile_id + " (@" + owner_username + ") — they may not have started the bot yet."
             )
         supabase.table("profiles").update({"notified": True}).eq("id", profile_id).execute()
+
+
+async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    await update.message.reply_text("⏳ Reposting all active profiles with updated format. This may take a moment...")
+
+    result = (
+        supabase.table("profiles")
+        .select("*")
+        .eq("is_active", True)
+        .eq("is_paused", False)
+        .execute()
+    )
+
+    if not result.data:
+        await update.message.reply_text("No active profiles found.")
+        return
+
+    success_count = 0
+    fail_count = 0
+
+    for p in result.data:
+        profile_id = p["id"]
+        try:
+            text = build_profile_text(p)
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=text,
+                reply_markup=profile_button_markup(profile_id),
+            )
+            success_count += 1
+            logging.info(f"Reposted {profile_id}")
+        except Exception as e:
+            fail_count += 1
+            logging.warning(f"Failed to repost {profile_id}: {str(e)}")
+
+    await update.message.reply_text(
+        f"✅ Repost complete.\n\n"
+        f"✅ Success: {success_count}\n"
+        f"❌ Failed: {fail_count}\n\n"
+        f"All active profiles have been reposted with the full updated format."
+    )
 
 
 async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1469,6 +1549,7 @@ def main() -> None:
     app.add_handler(CommandHandler("affiliate_stats", affiliate_stats))
     app.add_handler(CommandHandler("convert", convert_referral))
     app.add_handler(CommandHandler("resend_requests", resend_requests))
+    app.add_handler(CommandHandler("repost_all", repost_all))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw|pause|resume):"))
 
