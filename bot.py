@@ -209,7 +209,6 @@ def get_requester_profile(username: str) -> dict:
 # ── Repost profile helper ──────────────────────────────────────────────────────
 
 async def repost_profile(profile_id: str, context) -> None:
-    """Repost a profile to the channel — called after decline or withdraw when queue is empty."""
     try:
         profile_result = (
             supabase.table("profiles")
@@ -254,7 +253,6 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
     )
 
     if not next_result.data:
-        # Queue is empty — repost if requested
         if repost_if_empty:
             await repost_profile(profile_id, context)
         return
@@ -468,6 +466,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         logging.info(f"Referral recorded: {user.id} via {affiliate_code}")
             except Exception as e:
                 logging.warning("Could not record referral: " + str(e))
+
+    # Create user_state record if doesn't exist — marks them as having started the bot
+    try:
+        existing_state = (
+            supabase.table("user_state")
+            .select("id")
+            .eq("telegram_user_id", user.id)
+            .limit(1)
+            .execute()
+        )
+        if not existing_state.data:
+            supabase.table("user_state").insert({
+                "telegram_user_id": user.id,
+                "state": "free",
+            }).execute()
+            logging.info(f"user_state created for {user.id} @{username}")
+    except Exception as e:
+        logging.warning("Could not create user_state: " + str(e))
 
     if username:
         result = (
@@ -822,6 +838,24 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except Exception:
             pass
         return
+
+    # Check if user has started the bot
+    try:
+        user_started = (
+            supabase.table("user_state")
+            .select("id")
+            .eq("telegram_user_id", user.id)
+            .limit(1)
+            .execute()
+        )
+        if not user_started.data:
+            await query.answer(
+                "Please start the Mithaq bot first. Open @Mithaq_Marriage_bot, type /start and send it — then you can express interest insha'Allah.",
+                show_alert=True,
+            )
+            return
+    except Exception as e:
+        logging.warning("Could not check user_state: " + str(e))
 
     # Check if user is a member of the channel
     try:
@@ -1326,7 +1360,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await query.edit_message_text("❌ You declined request " + str(request_id) + " for profile " + profile_id + ".")
 
-        # Advance queue — repost if queue is now empty
         await advance_queue(profile_id, context, repost_if_empty=True)
 
 
