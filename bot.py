@@ -198,7 +198,7 @@ def get_requester_profile(username: str) -> dict:
         return None
     result = (
         supabase.table("profiles")
-        .select("id, photo_url")
+        .select("*")
         .eq("owner_telegram_username", username.lower())
         .limit(1)
         .execute()
@@ -402,7 +402,7 @@ def post_new_profile():
             "Here's what happens next:\n\n"
             "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
             "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
-            "3️⃣ If you Approve, the person receives your contact details\n"
+            "3️⃣ If you Approve, contact details are exchanged between both parties\n"
             "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
             "📌 You are in full control — nothing is shared without your approval\n"
             "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
@@ -467,7 +467,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as e:
                 logging.warning("Could not record referral: " + str(e))
 
-    # Create user_state record if doesn't exist — marks them as having started the bot
     try:
         existing_state = (
             supabase.table("user_state")
@@ -513,7 +512,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "Here's what happens next:\n\n"
                     "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
                     "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
-                    "3️⃣ If you Approve, the person receives your contact details\n"
+                    "3️⃣ If you Approve, contact details are exchanged between both parties\n"
                     "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
                     "📌 You are in full control — nothing is shared without your approval\n"
                     "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
@@ -551,7 +550,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "1️⃣ Browse profiles in the channel\n"
         "2️⃣ Tap 📩 Express Interest on any profile you like\n"
         "3️⃣ The profile owner will be notified and will Approve or Decline\n"
-        "4️⃣ If approved, you'll receive their contact details here\n\n"
+        "4️⃣ If approved, contact details are exchanged between both parties\n\n"
         "📌 You can only have one active request at a time\n"
         "📌 If declined, you're free to express interest in another profile\n"
         "📌 You can withdraw your interest at any time — just send /withdraw\n"
@@ -600,7 +599,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "active_request_id": None,
             "state": "free",
         }).eq("telegram_user_id", user.id).execute()
-        await update.message.reply_text("Your request has already been decided. You are free to express interest in another profile.")
+        await update.message.reply_text("Your request has already been handled. You are free to express interest in another profile.")
         return
 
     profile_id = req_result.data[0]["profile_id"]
@@ -734,7 +733,7 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Here's what happens next:\n\n"
             "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
             "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
-            "3️⃣ If you Approve, the person receives your contact details\n"
+            "3️⃣ If you Approve, contact details are exchanged between both parties\n"
             "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
             "📌 You are in full control — nothing is shared without your approval\n"
             "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
@@ -820,7 +819,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     _, profile_id = query.data.split(":", 1)
 
-    # Check if user has a Telegram username
     if not user.username:
         await query.answer(
             "You need a Telegram username to use Mithaq. Go to Settings → Username to set one.",
@@ -839,7 +837,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             pass
         return
 
-    # Check if user has started the bot
     try:
         user_started = (
             supabase.table("user_state")
@@ -857,7 +854,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as e:
         logging.warning("Could not check user_state: " + str(e))
 
-    # Check if user is a member of the channel
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user.id)
         if member.status in ("left", "kicked", "banned"):
@@ -880,7 +876,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as e:
         logging.warning("Could not check channel membership: " + str(e))
 
-    # Check if user has a Mithaq profile
     requester_profile = get_requester_profile(user.username)
     if not requester_profile:
         await query.answer(
@@ -983,7 +978,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     request_id = request_result.data[0]["id"]
 
     requester_profile_id = requester_profile["id"] if requester_profile else None
-    requester_photo_url = requester_profile["photo_url"] if requester_profile else None
+    requester_photo_url = requester_profile.get("photo_url") if requester_profile else None
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
 
     requester_has_photo = bool(requester_photo_url)
@@ -1167,7 +1162,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         if not req_result.data or req_result.data[0].get("status") != "pending":
-            await query.edit_message_text("This request has already been decided.")
+            await query.edit_message_text("This request has already been handled.")
             return
 
         profile_id = req_result.data[0]["profile_id"]
@@ -1210,7 +1205,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     req = req_result.data[0]
 
     if req.get("status") != "pending":
-        await query.edit_message_text("This request has already been decided.")
+        await query.edit_message_text("This request has already been handled.")
         return
 
     requester_id = req["requester_telegram_user_id"]
@@ -1261,30 +1256,74 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         wali = p.get("wali_contact", "")
         tg_username = p.get("owner_telegram_username", "")
 
+        # ── Send profile owner's contact details to requester ──
         if "sister" in gender or "female" in gender:
             first_name = full_name.split()[0] if full_name else ""
             contact_msg = (
                 "Alhamdulillah! Your interest in profile " + profile_id + " has been approved. 🤲\n\n"
-                "Here are the contact details:\n"
+                "Here are their contact details:\n"
                 "First Name: " + first_name + "\n"
                 "Wali Contact: " + wali + "\n\n"
-                "Please contact the wali to proceed insha'Allah."
+                "Please contact the wali to proceed insha'Allah.\n\n"
+                "May Allah make it easy for you both. 🤲"
             )
         else:
             contact_msg = (
                 "Alhamdulillah! Your interest in profile " + profile_id + " has been approved. 🤲\n\n"
-                "Here are the contact details:\n"
+                "Here are their contact details:\n"
                 "Name: " + full_name + "\n"
                 "Telegram: @" + tg_username + "\n"
                 "Phone: " + phone + "\n\n"
-                "JazakAllahu khayran."
+                "May Allah make it easy for you both. 🤲"
             )
 
         await context.bot.send_message(chat_id=requester_id, text=contact_msg)
 
+        # ── Send requester's contact details to profile owner ──
+        requester_profile_full = get_requester_profile(requester_username)
+        if requester_profile_full and owner_tg_id:
+            req_gender = requester_profile_full.get("gender", "").lower()
+            req_full_name = requester_profile_full.get("full_name", "")
+            req_phone = requester_profile_full.get("phone", "")
+            req_wali = requester_profile_full.get("wali_contact", "")
+            req_tg_username = requester_profile_full.get("owner_telegram_username", "")
+            req_profile_id = requester_profile_full.get("id", "")
+
+            if "sister" in req_gender or "female" in req_gender:
+                req_first_name = req_full_name.split()[0] if req_full_name else ""
+                owner_contact_msg = (
+                    "✅ You approved the interest from " + req_profile_id + ". Contact details have been exchanged.\n\n"
+                    "Here are their contact details:\n"
+                    "First Name: " + req_first_name + "\n"
+                    "Wali Contact: " + req_wali + "\n\n"
+                    "May Allah make it easy for you both. 🤲"
+                )
+            else:
+                owner_contact_msg = (
+                    "✅ You approved the interest from " + req_profile_id + ". Contact details have been exchanged.\n\n"
+                    "Here are their contact details:\n"
+                    "Name: " + req_full_name + "\n"
+                    "Telegram: @" + req_tg_username + "\n"
+                    "Phone: " + req_phone + "\n\n"
+                    "May Allah make it easy for you both. 🤲"
+                )
+            try:
+                await context.bot.send_message(chat_id=owner_tg_id, text=owner_contact_msg)
+            except Exception as e:
+                logging.warning("Could not send requester contact to owner: " + str(e))
+        elif owner_tg_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_tg_id,
+                    text="✅ You approved the interest request. Your contact details have been shared with them. May Allah make it easy for you both. 🤲"
+                )
+            except Exception as e:
+                logging.warning("Could not send confirmation to owner: " + str(e))
+
+        # ── Share photos if approved_photo ──
         if share_photos:
             requester_profile = get_requester_profile(requester_username)
-            requester_photo_url = requester_profile["photo_url"] if requester_profile else None
+            requester_photo_url = requester_profile.get("photo_url") if requester_profile else None
 
             if requester_photo_url and owner_photo_url:
                 try:
@@ -1624,7 +1663,7 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     requester_profile = get_requester_profile(requester_username)
     requester_profile_id = requester_profile["id"] if requester_profile else None
-    requester_photo_url = requester_profile["photo_url"] if requester_profile else None
+    requester_photo_url = requester_profile.get("photo_url") if requester_profile else None
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
 
     requester_has_photo = bool(requester_photo_url)
