@@ -33,6 +33,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_TELEGRAM_USER_ID = int(os.environ["ADMIN_TELEGRAM_USER_ID"])
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "mithaq-secret-2026")
+CHANNEL_LINK = "https://t.me/+ilWsgu9hLb02ODQ0"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -85,6 +86,27 @@ def pause_markup(profile_id: str) -> InlineKeyboardMarkup:
 def resume_markup(profile_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("▶️ Resume Profile", callback_data="resume:" + profile_id)]]
+    )
+
+
+# ── Welcome message builder ────────────────────────────────────────────────────
+
+def build_welcome_message(profile_id: str) -> str:
+    return (
+        "Assalamu alaikum! 🌸\n\n"
+        "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live in the channel!\n\n"
+        "Here's what happens next:\n\n"
+        "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
+        "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
+        "3️⃣ If you Approve, contact details are exchanged between both parties\n"
+        "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
+        "📌 You are in full control — nothing is shared without your approval\n"
+        "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
+        "📢 Browse profiles and express interest here: " + CHANNEL_LINK + "\n\n"
+        "📌 You can pause your profile at any time using the button below.\n\n"
+        "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
+        "Questions? Contact @MithaqAdmin 🤲\n\n"
+        "May Allah make it easy for you 🤲"
     )
 
 
@@ -396,21 +418,7 @@ def post_new_profile():
     owner_tg_id = p.get("owner_telegram_user_id")
     owner_username = p.get("owner_telegram_username", "")
     if is_new:
-        welcome_msg = (
-            "Assalamu alaikum! 🌸\n\n"
-            "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live in the channel!\n\n"
-            "Here's what happens next:\n\n"
-            "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
-            "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
-            "3️⃣ If you Approve, contact details are exchanged between both parties\n"
-            "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
-            "📌 You are in full control — nothing is shared without your approval\n"
-            "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
-            "📌 You can pause your profile at any time using the button below.\n\n"
-            "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
-            "Questions? Contact @MithaqAdmin 🤲\n\n"
-            "May Allah make it easy for you 🤲"
-        )
+        welcome_msg = build_welcome_message(profile_id)
         if owner_tg_id:
             send_telegram_message(str(owner_tg_id), welcome_msg,
                 reply_markup={
@@ -506,21 +514,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=ADMIN_TELEGRAM_USER_ID,
                     text="✅ Owner registered: " + profile_id + " @" + username + " ID " + str(user.id),
                 )
-                welcome_msg = (
-                    "Assalamu alaikum! 🌸\n\n"
-                    "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live in the channel!\n\n"
-                    "Here's what happens next:\n\n"
-                    "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
-                    "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
-                    "3️⃣ If you Approve, contact details are exchanged between both parties\n"
-                    "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
-                    "📌 You are in full control — nothing is shared without your approval\n"
-                    "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
-                    "📌 You can pause your profile at any time using the button below.\n\n"
-                    "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
-                    "Questions? Contact @MithaqAdmin 🤲\n\n"
-                    "May Allah make it easy for you 🤲"
-                )
+                welcome_msg = build_welcome_message(profile_id)
                 await update.message.reply_text(
                     welcome_msg,
                     reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
@@ -528,7 +522,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
                 await update.message.reply_text(
-                    "📋 Your profile: *" + profile_id + "*\n\n" + status_text + "\n\n📌 If you are not receiving notifications, please type /start again.",
+                    "📋 Your profile: *" + profile_id + "*\n\n" + status_text + "\n\n"
+                    "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
+                    "📌 If you are not receiving notifications, please type /start again.",
                     parse_mode="Markdown",
                     reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
                 )
@@ -556,7 +552,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📌 You can withdraw your interest at any time — just send /withdraw\n"
         "📌 To check your request status, send /my_request\n"
         "📌 If you ever stop receiving notifications, simply type /start again\n\n"
-        "📢 Browse profiles here: https://t.me/+ilWsgu9hLb02ODQ0\n\n"
+        "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
         "Questions or issues? Contact @MithaqAdmin\n\n"
         "JazakAllahu khayran — may Allah make it easy for you 🤲"
     )
@@ -727,21 +723,7 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if is_new:
         owner_tg_id = p.get("owner_telegram_user_id")
         owner_username = p.get("owner_telegram_username", "")
-        welcome_msg = (
-            "Assalamu alaikum! 🌸\n\n"
-            "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live in the channel!\n\n"
-            "Here's what happens next:\n\n"
-            "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
-            "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
-            "3️⃣ If you Approve, contact details are exchanged between both parties\n"
-            "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
-            "📌 You are in full control — nothing is shared without your approval\n"
-            "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
-            "📌 You can pause your profile at any time using the button below.\n\n"
-            "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
-            "Questions? Contact @MithaqAdmin 🤲\n\n"
-            "May Allah make it easy for you 🤲"
-        )
+        welcome_msg = build_welcome_message(profile_id)
         sent = False
         if owner_tg_id:
             try:
@@ -1320,7 +1302,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except Exception as e:
                 logging.warning("Could not send confirmation to owner: " + str(e))
 
-        # ── Share photos if approved_photo ──
+        # ── Share photos if approve_photo ──
         if share_photos:
             requester_profile = get_requester_profile(requester_username)
             requester_photo_url = requester_profile.get("photo_url") if requester_profile else None
