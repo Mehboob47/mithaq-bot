@@ -621,7 +621,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
     if was_active:
-        await advance_queue(profile_id, context, repost_if_empty=True)
+        await advance_queue(profile_id, context, repost_if_empty=False)
 
 
 async def my_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -741,6 +741,43 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 text="Could not send welcome to owner of " + profile_id + " (@" + owner_username + ") — they may not have started the bot yet."
             )
         supabase.table("profiles").update({"notified": True}).eq("id", profile_id).execute()
+
+
+async def bump_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /bump MTHAQ-001")
+        return
+
+    profile_id = context.args[0].strip()
+
+    result = (
+        supabase.table("profiles")
+        .select("*")
+        .eq("id", profile_id)
+        .eq("is_active", True)
+        .eq("is_paused", False)
+        .limit(1)
+        .execute()
+    )
+
+    if not result.data:
+        await update.message.reply_text("Profile " + profile_id + " not found, inactive or paused.")
+        return
+
+    p = result.data[0]
+    text = build_profile_text(p)
+
+    await context.bot.send_message(
+        chat_id=CHANNEL_ID,
+        text=text,
+        reply_markup=profile_button_markup(profile_id),
+    )
+    await update.message.reply_text("✅ Profile " + profile_id + " bumped to channel.")
 
 
 async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1169,7 +1206,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         if was_active:
-            await advance_queue(profile_id, context, repost_if_empty=True)
+            await advance_queue(profile_id, context, repost_if_empty=False)
         return
 
     req_result = (
@@ -1381,7 +1418,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await query.edit_message_text("❌ You declined request " + str(request_id) + " for profile " + profile_id + ".")
 
-        await advance_queue(profile_id, context, repost_if_empty=True)
+        await advance_queue(profile_id, context, repost_if_empty=False)
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1691,6 +1728,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("post_profile", post_profile))
+    app.add_handler(CommandHandler("bump", bump_profile))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("unlock", unlock_user))
     app.add_handler(CommandHandler("dashboard", dashboard))
