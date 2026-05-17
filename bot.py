@@ -18,6 +18,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 load_dotenv()
@@ -34,6 +36,17 @@ ADMIN_TELEGRAM_USER_ID = int(os.environ["ADMIN_TELEGRAM_USER_ID"])
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "mithaq-secret-2026")
 CHANNEL_LINK = "https://t.me/+ilWsgu9hLb02ODQ0"
+
+DECLINE_REASONS = {
+    "not_right_fit": "Not the right fit at this time",
+    "location": "Location not compatible",
+    "age": "Age preference not met",
+    "deen": "Looking for a different level of practice",
+    "children": "Different preference on children",
+    "marital": "Prefers someone who hasn't been married before",
+    "istikhara": "Made istikhara — doesn't feel right",
+    "break": "Taking a break from searching",
+}
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -63,6 +76,20 @@ def admin_request_markup(request_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("✅ Approve", callback_data="approve:" + str(request_id)),
         InlineKeyboardButton("❌ Decline", callback_data="decline:" + str(request_id)),
     ]])
+
+
+def decline_reason_markup(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Not the right fit", callback_data=f"dr:{request_id}:not_right_fit")],
+        [InlineKeyboardButton("📍 Location not compatible", callback_data=f"dr:{request_id}:location")],
+        [InlineKeyboardButton("🎂 Age preference not met", callback_data=f"dr:{request_id}:age")],
+        [InlineKeyboardButton("🕌 Different level of practice", callback_data=f"dr:{request_id}:deen")],
+        [InlineKeyboardButton("👶 Different preference on children", callback_data=f"dr:{request_id}:children")],
+        [InlineKeyboardButton("💍 Prefer someone not previously married", callback_data=f"dr:{request_id}:marital")],
+        [InlineKeyboardButton("🤲 Istikhara — doesn't feel right", callback_data=f"dr:{request_id}:istikhara")],
+        [InlineKeyboardButton("⏸ Taking a break from searching", callback_data=f"dr:{request_id}:break")],
+        [InlineKeyboardButton("✏️ Other — type your own reason", callback_data=f"dr:{request_id}:other")],
+    ])
 
 
 def interest_confirmation_markup(request_id: int) -> InlineKeyboardMarkup:
@@ -101,7 +128,7 @@ def build_welcome_message(profile_id: str) -> str:
         "3️⃣ If you Approve, contact details are exchanged between both parties\n"
         "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
         "📌 You are in full control — nothing is shared without your approval\n"
-        "📌 Only first name and wali contact are shared upon approval (for sisters)\n\n"
+        "📌 Only wali contact is shared upon approval (for sisters)\n\n"
         "📢 Browse profiles and express interest here: " + CHANNEL_LINK + "\n\n"
         "📌 You can pause your profile at any time using the button below.\n\n"
         "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
@@ -228,6 +255,61 @@ def get_requester_profile(username: str) -> dict:
     return result.data[0] if result.data else None
 
 
+# ── Complete decline helper ────────────────────────────────────────────────────
+
+async def complete_decline(request_id: int, user, context, reason_text: str) -> None:
+    req_result = (
+        supabase.table("requests")
+        .select("*")
+        .eq("id", request_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not req_result.data or req_result.data[0].get("status") != "pending":
+        return
+
+    req = req_result.data[0]
+    requester_id = req["requester_telegram_user_id"]
+    profile_id = req["profile_id"]
+
+    supabase.table("requests").update({
+        "status": "declined",
+        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "decided_by_admin": user.id,
+    }).eq("id", request_id).execute()
+
+    supabase.table("user_state").update({
+        "active_request_id": None,
+        "state": "free",
+    }).eq("telegram_user_id", requester_id).execute()
+
+    supabase.table("user_state").update({
+        "active_request_id": None,
+        "state": "free",
+    }).eq("telegram_user_id", user.id).execute()
+
+    try:
+        await context.bot.send_message(
+            chat_id=requester_id,
+            text=(
+                "JazakAllahu khayran for your interest in profile " + profile_id + ". "
+                "Unfortunately this match was not taken forward at this time.\n\n"
+                "Reason: " + reason_text + "\n\n"
+                "You are welcome to express interest in another profile. 🤲"
+            )
+        )
+    except Exception as e:
+        logging.warning("Could not notify requester of decline: " + str(e))
+
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_USER_ID,
+        text="❌ Declined: profile " + profile_id + " request " + str(request_id) + " by @" + str(user.username or user.id) + "\nReason: " + reason_text,
+    )
+
+    await advance_queue(profile_id, context, repost_if_empty=False)
+
+
 # ── Repost profile helper ──────────────────────────────────────────────────────
 
 async def repost_profile(profile_id: str, context) -> None:
@@ -254,7 +336,7 @@ async def repost_profile(profile_id: str, context) -> None:
             text=text,
             reply_markup=profile_button_markup(profile_id),
         )
-        logging.info(f"✅ Reposted {profile_id} to channel after becoming available")
+        logging.info(f"✅ Reposted {profile_id} to channel")
 
     except Exception as e:
         logging.warning(f"Could not repost {profile_id}: {str(e)}")
@@ -786,7 +868,7 @@ async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Not authorised.")
         return
 
-    await update.message.reply_text("⏳ Reposting all active profiles with updated format. This will take a few minutes...")
+    await update.message.reply_text("⏳ Reposting all active profiles. This will take a few minutes...")
 
     result = (
         supabase.table("profiles")
@@ -814,7 +896,6 @@ async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 reply_markup=profile_button_markup(profile_id),
             )
             success_count += 1
-            logging.info(f"Reposted {profile_id}")
             await asyncio.sleep(2)
         except Exception as e:
             fail_count += 1
@@ -822,10 +903,7 @@ async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await asyncio.sleep(3)
 
     await update.message.reply_text(
-        f"✅ Repost complete.\n\n"
-        f"✅ Success: {success_count}\n"
-        f"❌ Failed: {fail_count}\n\n"
-        f"All active profiles have been reposted with the full updated format."
+        f"✅ Repost complete.\n✅ Success: {success_count}\n❌ Failed: {fail_count}"
     )
 
 
@@ -1108,6 +1186,64 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
 
+async def handle_decline_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+
+    if not query or not user or not query.data:
+        return
+
+    await query.answer()
+
+    parts = query.data.split(":", 2)
+    if len(parts) != 3:
+        return
+
+    _, request_id_str, reason_code = parts
+    request_id = int(request_id_str)
+
+    if reason_code == "other":
+        supabase.table("user_state").update({
+            "state": "awaiting_decline_reason",
+            "active_request_id": request_id,
+        }).eq("telegram_user_id", user.id).execute()
+        await query.edit_message_text("Please type your reason for declining and send it as a message 👇")
+        return
+
+    reason_text = DECLINE_REASONS.get(reason_code, "Not the right fit")
+    await complete_decline(request_id, user, context, reason_text)
+    await query.edit_message_text("❌ Decline sent. JazakAllahu khayran.")
+
+
+async def handle_free_text_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not update.message or not update.message.text:
+        return
+
+    state_result = (
+        supabase.table("user_state")
+        .select("*")
+        .eq("telegram_user_id", user.id)
+        .limit(1)
+        .execute()
+    )
+
+    if not state_result.data:
+        return
+
+    state = state_result.data[0].get("state")
+    if state != "awaiting_decline_reason":
+        return
+
+    request_id = state_result.data[0].get("active_request_id")
+    if not request_id:
+        return
+
+    reason_text = update.message.text.strip()
+    await complete_decline(request_id, user, context, reason_text)
+    await update.message.reply_text("❌ Decline sent with your reason. JazakAllahu khayran.")
+
+
 async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
@@ -1149,7 +1285,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_reply_markup(reply_markup=resume_markup(profile_id))
             await context.bot.send_message(
                 chat_id=user.id,
-                text="⏸ Your profile " + profile_id + " has been paused. No new interest requests will be accepted until you resume. 🤲"
+                text="⏸ Your profile " + profile_id + " has been paused. 🤲"
             )
             await context.bot.send_message(
                 chat_id=ADMIN_TELEGRAM_USER_ID,
@@ -1160,7 +1296,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_reply_markup(reply_markup=pause_markup(profile_id))
             await context.bot.send_message(
                 chat_id=user.id,
-                text="▶️ Your profile " + profile_id + " has been resumed. You will now receive interest requests again. 🤲"
+                text="▶️ Your profile " + profile_id + " has been resumed. 🤲"
             )
             await context.bot.send_message(
                 chat_id=ADMIN_TELEGRAM_USER_ID,
@@ -1270,18 +1406,15 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         p = profile_result.data[0] if profile_result.data else {}
         gender = p.get("gender", "").lower()
-        full_name = p.get("full_name", "")
         phone = p.get("phone", "")
         wali = p.get("wali_contact", "")
         tg_username = p.get("owner_telegram_username", "")
 
-        # ── Send profile owner's contact details to requester ──
+        # ── Send profile owner's contact details to requester (no names) ──
         if "sister" in gender or "female" in gender:
-            first_name = full_name.split()[0] if full_name else ""
             contact_msg = (
                 "Alhamdulillah! Your interest in profile " + profile_id + " has been approved. 🤲\n\n"
                 "Here are their contact details:\n"
-                "First Name: " + first_name + "\n"
                 "Wali Contact: " + wali + "\n\n"
                 "Please contact the wali to proceed insha'Allah.\n\n"
                 "May Allah make it easy for you both. 🤲"
@@ -1290,7 +1423,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             contact_msg = (
                 "Alhamdulillah! Your interest in profile " + profile_id + " has been approved. 🤲\n\n"
                 "Here are their contact details:\n"
-                "Name: " + full_name + "\n"
                 "Telegram: @" + tg_username + "\n"
                 "Phone: " + phone + "\n\n"
                 "May Allah make it easy for you both. 🤲"
@@ -1298,22 +1430,19 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await context.bot.send_message(chat_id=requester_id, text=contact_msg)
 
-        # ── Send requester's contact details to profile owner ──
+        # ── Send requester's contact details to profile owner (no names) ──
         requester_profile_full = get_requester_profile(requester_username)
         if requester_profile_full and owner_tg_id:
             req_gender = requester_profile_full.get("gender", "").lower()
-            req_full_name = requester_profile_full.get("full_name", "")
             req_phone = requester_profile_full.get("phone", "")
             req_wali = requester_profile_full.get("wali_contact", "")
             req_tg_username = requester_profile_full.get("owner_telegram_username", "")
             req_profile_id = requester_profile_full.get("id", "")
 
             if "sister" in req_gender or "female" in req_gender:
-                req_first_name = req_full_name.split()[0] if req_full_name else ""
                 owner_contact_msg = (
                     "✅ You approved the interest from " + req_profile_id + ". Contact details have been exchanged.\n\n"
                     "Here are their contact details:\n"
-                    "First Name: " + req_first_name + "\n"
                     "Wali Contact: " + req_wali + "\n\n"
                     "May Allah make it easy for you both. 🤲"
                 )
@@ -1321,7 +1450,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 owner_contact_msg = (
                     "✅ You approved the interest from " + req_profile_id + ". Contact details have been exchanged.\n\n"
                     "Here are their contact details:\n"
-                    "Name: " + req_full_name + "\n"
                     "Telegram: @" + req_tg_username + "\n"
                     "Phone: " + req_phone + "\n\n"
                     "May Allah make it easy for you both. 🤲"
@@ -1395,30 +1523,18 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 logging.warning("Could not notify queued user: " + str(e))
 
     elif action == "decline":
-        supabase.table("requests").update({
-            "status": "declined",
-            "decided_at": datetime.now(timezone.utc).isoformat(),
-            "decided_by_admin": user.id,
-        }).eq("id", request_id).execute()
-
+        # Store pending decline state and show reason buttons
         supabase.table("user_state").update({
-            "active_request_id": None,
-            "state": "free",
-        }).eq("telegram_user_id", requester_id).execute()
+            "state": "awaiting_decline_reason",
+            "active_request_id": request_id,
+        }).eq("telegram_user_id", user.id).execute()
 
+        await query.edit_message_text("Please select a reason for declining 👇")
         await context.bot.send_message(
-            chat_id=requester_id,
-            text="JazakAllahu khayran for your interest in profile " + profile_id + ". Unfortunately this match was not taken forward at this time. You are welcome to express interest in another profile. 🤲"
+            chat_id=user.id,
+            text="Why are you declining this request?",
+            reply_markup=decline_reason_markup(request_id),
         )
-
-        await context.bot.send_message(
-            chat_id=ADMIN_TELEGRAM_USER_ID,
-            text="❌ Declined: profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username", requester_id)) + " by @" + str(user.username or user.id),
-        )
-
-        await query.edit_message_text("❌ You declined request " + str(request_id) + " for profile " + profile_id + ".")
-
-        await advance_queue(profile_id, context, repost_if_empty=False)
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1526,10 +1642,7 @@ async def add_affiliate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         link = f"https://mithaqmarriage.com?ref={code}"
 
         await update.message.reply_text(
-            "✅ Affiliate created!\n\n"
-            "Name: " + name + "\n"
-            "Code: " + code + "\n"
-            "Link: " + link
+            "✅ Affiliate created!\n\nName: " + name + "\nCode: " + code + "\nLink: " + link
         )
     except Exception as e:
         await update.message.reply_text("❌ Error: " + str(e))
@@ -1620,9 +1733,7 @@ async def convert_referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         }).eq("id", referral["id"]).execute()
 
         await update.message.reply_text(
-            "✅ Referral marked as converted!\n\n"
-            "User: @" + str(referral.get("telegram_username", referral["telegram_user_id"])) + "\n"
-            "Affiliate: " + referral["affiliate_code"]
+            "✅ Referral marked as converted!\n\nUser: @" + str(referral.get("telegram_username", referral["telegram_user_id"])) + "\nAffiliate: " + referral["affiliate_code"]
         )
     except Exception as e:
         await update.message.reply_text("❌ Error: " + str(e))
@@ -1703,13 +1814,9 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text=request_text,
             reply_markup=owner_request_markup(request_id, requester_has_photo, owner_has_photo),
         )
-        await update.message.reply_text(
-            "✅ Request resent to owner of " + profile_id + " successfully."
-        )
+        await update.message.reply_text("✅ Request resent to owner of " + profile_id + " successfully.")
     except Exception as e:
-        await update.message.reply_text(
-            "❌ Could not send to owner: " + str(e)
-        )
+        await update.message.reply_text("❌ Could not send to owner: " + str(e))
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -1740,7 +1847,9 @@ def main() -> None:
     app.add_handler(CommandHandler("resend_requests", resend_requests))
     app.add_handler(CommandHandler("repost_all", repost_all))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
+    app.add_handler(CallbackQueryHandler(handle_decline_reason, pattern=r"^dr:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw|pause|resume):"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text_reason))
 
     print("✅ Mithaq bot is running...")
     app.run_polling()
