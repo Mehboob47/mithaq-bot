@@ -632,22 +632,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         return
 
-    # No profile found after all retries
+    # No profile found after all retries — notify user and admin
     await update.message.reply_text(
-        "Assalamu alaikum! Welcome to Mithaq Marriage 🌸\n\n"
-        "Here's how it works:\n\n"
-        "1️⃣ Browse profiles in the channel\n"
-        "2️⃣ Tap 📩 Express Interest on any profile you like\n"
-        "3️⃣ The profile owner will be notified and will Approve or Decline\n"
-        "4️⃣ If approved, contact details are exchanged between both parties\n\n"
-        "📌 You can only have one active request at a time\n"
-        "📌 If declined, you're free to express interest in another profile\n"
-        "📌 You can withdraw your interest at any time — just send /withdraw\n"
-        "📌 To check your request status, send /my_request\n"
-        "📌 If you ever stop receiving notifications, simply type /start again\n\n"
-        "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
-        "Questions or issues? Contact @MithaqAdmin\n\n"
-        "JazakAllahu khayran — may Allah make it easy for you 🤲"
+        "JazakAllahu khayran for your patience. We couldn't find your profile just yet — it may still be processing.\n\n"
+        "Please try typing /start again in a few minutes. If the issue persists, contact @MithaqAdmin and we'll get it sorted insha'Allah. 🤲"
+    )
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_USER_ID,
+        text="⚠️ Profile not found after 6 attempts for @" + username + " (Telegram ID: " + str(user.id) + "). Please investigate.",
     )
 
 
