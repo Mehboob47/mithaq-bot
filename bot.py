@@ -585,6 +585,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Retry logic — profile may not be in Supabase yet if /start sent immediately after form submission
+    await update.message.reply_text(
+        "Assalamu alaikum! 🌸\n\nJazakAllahu khayran — we're setting up your account, please wait a moment insha'Allah..."
+    )
     profile = None
     for attempt in range(6):
         result = (
