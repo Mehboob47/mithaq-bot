@@ -574,44 +574,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logging.warning("Could not create user_state: " + str(e))
 
-    if username:
-        result = (
-            supabase.table("profiles")
-            .select("id, owner_telegram_user_id, is_paused")
-            .eq("owner_telegram_username", username)
-            .limit(1)
-            .execute()
-        )
-        if result.data:
-            profile = result.data[0]
-            profile_id = profile["id"]
-            is_paused = profile.get("is_paused", False)
-
-            if not profile.get("owner_telegram_user_id"):
-                supabase.table("profiles").update({
-                    "owner_telegram_user_id": user.id
-                }).eq("id", profile_id).execute()
-                logging.info(f"Owner registered on start: {profile_id} @{username} ID {user.id}")
-                await context.bot.send_message(
-                    chat_id=ADMIN_TELEGRAM_USER_ID,
-                    text="✅ Owner registered: " + profile_id + " @" + username + " ID " + str(user.id),
-                )
-                welcome_msg = build_welcome_message(profile_id)
-                await update.message.reply_text(
-                    welcome_msg,
-                    reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
-                )
-            else:
-                status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
-                await update.message.reply_text(
-                    "📋 Your profile: *" + profile_id + "*\n\n" + status_text + "\n\n"
-                    "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
-                    "📌 If you are not receiving notifications, please type /start again.",
-                    parse_mode="Markdown",
-                    reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
-                )
-            return
-
     if not username:
         await update.message.reply_text(
             "Assalamu alaikum! 🌸\n\n"
@@ -622,6 +584,52 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    # Retry logic — profile may not be in Supabase yet if /start sent immediately after form submission
+    profile = None
+    for attempt in range(6):
+        result = (
+            supabase.table("profiles")
+            .select("id, owner_telegram_user_id, is_paused")
+            .eq("owner_telegram_username", username)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            profile = result.data[0]
+            break
+        logging.info(f"Profile not found for @{username} — attempt {attempt + 1}/6, retrying in 5s...")
+        await asyncio.sleep(5)
+
+    if profile:
+        profile_id = profile["id"]
+        is_paused = profile.get("is_paused", False)
+
+        if not profile.get("owner_telegram_user_id"):
+            supabase.table("profiles").update({
+                "owner_telegram_user_id": user.id
+            }).eq("id", profile_id).execute()
+            logging.info(f"Owner registered on start: {profile_id} @{username} ID {user.id}")
+            await context.bot.send_message(
+                chat_id=ADMIN_TELEGRAM_USER_ID,
+                text="✅ Owner registered: " + profile_id + " @" + username + " ID " + str(user.id),
+            )
+            welcome_msg = build_welcome_message(profile_id)
+            await update.message.reply_text(
+                welcome_msg,
+                reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
+            )
+        else:
+            status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
+            await update.message.reply_text(
+                "📋 Your profile: *" + profile_id + "*\n\n" + status_text + "\n\n"
+                "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
+                "📌 If you are not receiving notifications, please type /start again.",
+                parse_mode="Markdown",
+                reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
+            )
+        return
+
+    # No profile found after all retries
     await update.message.reply_text(
         "Assalamu alaikum! Welcome to Mithaq Marriage 🌸\n\n"
         "Here's how it works:\n\n"
@@ -1410,7 +1418,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         wali = p.get("wali_contact", "")
         tg_username = p.get("owner_telegram_username", "")
 
-        # ── Send profile owner's contact details to requester (no names) ──
         if "sister" in gender or "female" in gender:
             contact_msg = (
                 "Alhamdulillah! Your interest in profile " + profile_id + " has been approved. 🤲\n\n"
@@ -1430,7 +1437,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await context.bot.send_message(chat_id=requester_id, text=contact_msg)
 
-        # ── Send requester's contact details to profile owner (no names) ──
         requester_profile_full = get_requester_profile(requester_username)
         if requester_profile_full and owner_tg_id:
             req_gender = requester_profile_full.get("gender", "").lower()
@@ -1467,7 +1473,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except Exception as e:
                 logging.warning("Could not send confirmation to owner: " + str(e))
 
-        # ── Share photos if approve_photo ──
         if share_photos:
             requester_profile = get_requester_profile(requester_username)
             requester_photo_url = requester_profile.get("photo_url") if requester_profile else None
@@ -1523,7 +1528,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 logging.warning("Could not notify queued user: " + str(e))
 
     elif action == "decline":
-        # Store pending decline state and show reason buttons
         supabase.table("user_state").update({
             "state": "awaiting_decline_reason",
             "active_request_id": request_id,
