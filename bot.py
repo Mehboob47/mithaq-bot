@@ -35,6 +35,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_TELEGRAM_USER_ID = int(os.environ["ADMIN_TELEGRAM_USER_ID"])
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "mithaq-secret-2026")
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 CHANNEL_LINK = "https://t.me/+ilWsgu9hLb02ODQ0"
 
 DECLINE_REASONS = {
@@ -129,6 +130,7 @@ def build_welcome_message(profile_id: str) -> str:
         "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
         "📌 You are in full control — nothing is shared without your approval\n"
         "📌 Only wali contact is shared upon approval (for sisters)\n\n"
+        "🔔 Please make sure Telegram notifications are turned ON for this chat (tap the bot name above → Notifications) — this is how you'll hear about interest in your profile.\n\n"
         "📢 Browse profiles and express interest here: " + CHANNEL_LINK + "\n\n"
         "📌 You can pause your profile at any time using the button below.\n\n"
         "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
@@ -1818,6 +1820,125 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("❌ Could not send to owner: " + str(e))
 
 
+# ── Email helper (SendGrid) ────────────────────────────────────────────────────
+
+def send_reminder_email(to_email: str, profile_id: str, requester_profile_text: str) -> bool:
+    if not SENDGRID_API_KEY or not to_email:
+        return False
+
+    subject = "Pending response needed — Mithaq"
+
+    body = (
+        "Assalamu alaikum,\n\n"
+        + requester_profile_text + " expressed interest in your profile (" + profile_id + ") "
+        "2 hours ago and is still waiting for your Approve or Decline.\n\n"
+        "They remain interested for now, but the longer this stays unanswered, the more likely "
+        "they are to withdraw and move on to other profiles.\n\n"
+        "Please check Telegram when you can to Approve or Decline.\n\n"
+        "The Mithaq Team\n"
+        "info@mithaqmarriage.com\n"
+        "mithaqmarriage.com"
+    )
+
+    payload = {
+        "personalizations": [{"to": [{"email": to_email}]}],
+        "from": {"email": "info@mithaqmarriage.com", "name": "Mithaq Marriage"},
+        "reply_to": {"email": "info@mithaqmarriage.com", "name": "Mithaq Marriage"},
+        "subject": subject,
+        "content": [{"type": "text/plain", "value": body}],
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={
+                "Authorization": "Bearer " + SENDGRID_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code == 202:
+            return True
+        logging.warning(f"SendGrid reminder email failed: {resp.status_code} — {resp.text}")
+        return False
+    except Exception as e:
+        logging.warning("Could not send reminder email: " + str(e))
+        return False
+
+
+# ── Pending request reminder check (runs every 30 minutes) ────────────────────
+
+async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        cutoff = datetime.now(timezone.utc).timestamp() - (2 * 60 * 60)  # 2 hours ago
+        cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+
+        result = (
+            supabase.table("requests")
+            .select("*")
+            .eq("status", "pending")
+            .eq("is_active_request", True)
+            .eq("reminder_sent", False)
+            .lt("created_at", cutoff_iso)
+            .execute()
+        )
+
+        if not result.data:
+            return
+
+        for req in result.data:
+            request_id = req["id"]
+            profile_id = req["profile_id"]
+            requester_username = req.get("requester_username", "")
+
+            profile_result = (
+                supabase.table("profiles")
+                .select("*")
+                .eq("id", profile_id)
+                .limit(1)
+                .execute()
+            )
+
+            if not profile_result.data:
+                continue
+
+            profile = profile_result.data[0]
+            owner_tg_id = profile.get("owner_telegram_user_id")
+            owner_email = profile.get("email")
+
+            requester_profile = get_requester_profile(requester_username)
+            requester_profile_id = requester_profile["id"] if requester_profile else None
+            requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Someone"
+
+            # Telegram reminder
+            if owner_tg_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_tg_id,
+                        text=(
+                            "🔔 Reminder: " + requester_profile_text + " expressed interest in your profile "
+                            + profile_id + " 2 hours ago and is still waiting for your Approve or Decline.\n\n"
+                            "They remain interested for now, but the longer this stays unanswered, the more likely "
+                            "they are to withdraw and move on to other profiles."
+                        ),
+                    )
+                except Exception as e:
+                    logging.warning("Could not send Telegram reminder: " + str(e))
+
+            # Email reminder
+            if owner_email:
+                send_reminder_email(owner_email, profile_id, requester_profile_text)
+
+            # Mark as reminded so it never fires again for this request
+            supabase.table("requests").update({"reminder_sent": True}).eq("id", request_id).execute()
+
+            logging.info(f"✅ Sent 2hr reminder for request {request_id} (profile {profile_id})")
+
+    except Exception as e:
+        logging.warning("ERROR in check_pending_reminders: " + str(e))
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def run_flask():
@@ -1849,6 +1970,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_decline_reason, pattern=r"^dr:"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw|pause|resume):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text_reason))
+
+    # Run pending-request reminder check every 30 minutes
+    app.job_queue.run_repeating(check_pending_reminders, interval=1800, first=60)
 
     print("✅ Mithaq bot is running...")
     app.run_polling()
