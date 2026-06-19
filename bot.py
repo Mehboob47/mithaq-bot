@@ -117,6 +117,12 @@ def resume_markup(profile_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def available_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🔄 Make me available again", callback_data="avail_menu")]]
+    )
+
+
 # ── Welcome message builder ────────────────────────────────────────────────────
 
 def build_welcome_message(profile_id: str) -> str:
@@ -594,7 +600,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for attempt in range(6):
         result = (
             supabase.table("profiles")
-            .select("id, owner_telegram_user_id, is_paused")
+            .select("id, owner_telegram_user_id, is_paused, is_matched")
             .eq("owner_telegram_username", username)
             .limit(1)
             .execute()
@@ -608,6 +614,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if profile:
         profile_id = profile["id"]
         is_paused = profile.get("is_paused", False)
+        is_matched = profile.get("is_matched", False)
 
         if not profile.get("owner_telegram_user_id"):
             supabase.table("profiles").update({
@@ -624,13 +631,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
             )
         else:
-            status_text = "⏸ Your profile is currently *paused*." if is_paused else "✅ Your profile is currently *active*."
+            if is_matched:
+                status_text = "💬 You're currently in a conversation through Mithaq, so your profile is on hold."
+                markup = available_menu_markup()
+            elif is_paused:
+                status_text = "⏸ Your profile is currently *paused*."
+                markup = resume_markup(profile_id)
+            else:
+                status_text = "✅ Your profile is currently *active*."
+                markup = pause_markup(profile_id)
             await update.message.reply_text(
                 "📋 Your profile: *" + profile_id + "*\n\n" + status_text + "\n\n"
                 "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
                 "📌 If you are not receiving notifications, please type /start again.",
                 parse_mode="Markdown",
-                reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
+                reply_markup=markup,
             )
         return
 
@@ -1028,9 +1043,18 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     profile = profile_result.data[0]
 
+    if profile.get("is_matched"):
+        await query.answer(
+            "This person is currently in a conversation through Mithaq and isn't receiving new "
+            "interest right now. Please feel free to express interest in another profile. 🤲",
+            show_alert=True,
+        )
+        return
+
     if profile.get("is_paused"):
         await query.answer(
-            "This profile is temporarily paused. Please check back later.",
+            "This profile is paused at the moment and isn't receiving interest. "
+            "Please check back later. 🤲",
             show_alert=True,
         )
         return
@@ -1432,9 +1456,19 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "May Allah make it easy for you both. 🤲"
             )
 
-        await context.bot.send_message(chat_id=requester_id, text=contact_msg)
+        contact_msg += "\n\n📌 When you're ready to return to searching, tap the button below or send /available."
+        await context.bot.send_message(
+            chat_id=requester_id, text=contact_msg, reply_markup=available_menu_markup())
 
         requester_profile_full = get_requester_profile(requester_username)
+
+        # ── take BOTH parties out of circulation while they talk ──
+        supabase.table("profiles").update(
+            {"is_paused": True, "is_matched": True}).eq("id", profile_id).execute()
+        if requester_profile_full:
+            supabase.table("profiles").update(
+                {"is_paused": True, "is_matched": True}).eq("id", requester_profile_full["id"]).execute()
+
         if requester_profile_full and owner_tg_id:
             req_gender = requester_profile_full.get("gender", "").lower()
             req_phone = requester_profile_full.get("phone", "")
@@ -1457,15 +1491,20 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "Phone: " + req_phone + "\n\n"
                     "May Allah make it easy for you both. 🤲"
                 )
+            owner_contact_msg += "\n\n📌 When you're ready to return to searching, tap the button below or send /available."
             try:
-                await context.bot.send_message(chat_id=owner_tg_id, text=owner_contact_msg)
+                await context.bot.send_message(
+                    chat_id=owner_tg_id, text=owner_contact_msg, reply_markup=available_menu_markup())
             except Exception as e:
                 logging.warning("Could not send requester contact to owner: " + str(e))
         elif owner_tg_id:
             try:
                 await context.bot.send_message(
                     chat_id=owner_tg_id,
-                    text="✅ You approved the interest request. Your contact details have been shared with them. May Allah make it easy for you both. 🤲"
+                    text=("✅ You approved the interest request. Your contact details have been shared with them. "
+                          "May Allah make it easy for you both. 🤲\n\n"
+                          "📌 When you're ready to return to searching, tap the button below or send /available."),
+                    reply_markup=available_menu_markup(),
                 )
             except Exception as e:
                 logging.warning("Could not send confirmation to owner: " + str(e))
@@ -1538,6 +1577,127 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
+# ── /available — let a paused/matched user (and their partner) return ──────────
+
+async def _offer_available(user, reply, context) -> None:
+    """Find the user's profile and offer the confirm prompt. Shared by the
+    /available command and the button on the match message."""
+    profile = None
+    res = (supabase.table("profiles").select("*")
+           .eq("owner_telegram_user_id", user.id).limit(1).execute())
+    if res.data:
+        profile = res.data[0]
+    elif user.username:
+        res = (supabase.table("profiles").select("*")
+               .eq("owner_telegram_username", user.username.lower()).limit(1).execute())
+        profile = res.data[0] if res.data else None
+
+    if not profile:
+        await reply("I couldn't find your profile linked to this account. Please contact @MithaqAdmin. 🤲")
+        return
+
+    if profile.get("is_active") and not profile.get("is_paused") and not profile.get("is_matched"):
+        await reply(
+            "Your profile is already active — you can express interest in profiles now. 🤲\n\n"
+            "📢 Browse here: " + CHANNEL_LINK)
+        return
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes, make me available", callback_data="avail_yes:" + profile["id"]),
+        InlineKeyboardButton("❌ Cancel", callback_data="avail_no:" + profile["id"]),
+    ]])
+    await reply(
+        "This will put you back into circulation so you can express interest in profiles again, "
+        "and it will end your current match (the other person will be made available too).\n\n"
+        "Are you sure you'd like to continue?",
+        reply_markup=keyboard,
+    )
+
+
+async def available_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user:
+        return
+    await _offer_available(user, update.message.reply_text, context)
+
+
+async def available_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    await query.answer()
+    await _offer_available(user, query.message.reply_text, context)
+
+
+async def available_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    await query.answer()
+
+    action, profile_id = query.data.split(":", 1)
+
+    if action == "avail_no":
+        await query.edit_message_text("No problem — nothing has changed. 🤲")
+        return
+
+    # 1) reactivate this user's profile + free their state + repost
+    supabase.table("profiles").update(
+        {"is_active": True, "is_paused": False, "is_matched": False}).eq("id", profile_id).execute()
+    supabase.table("user_state").update(
+        {"state": "free", "active_request_id": None}).eq("telegram_user_id", user.id).execute()
+    await repost_profile(profile_id, context)
+
+    # 2) find the match partner via the most recent approved request (either direction)
+    partner_profile_id = None
+    partner_tg_id = None
+
+    res = (supabase.table("requests").select("*")
+           .eq("profile_id", profile_id).eq("status", "approved")
+           .order("decided_at", desc=True).limit(1).execute())
+    if res.data:                                   # this user was the OWNER
+        req = res.data[0]
+        partner_tg_id = req.get("requester_telegram_user_id")
+        partner_prof = get_requester_profile(req.get("requester_username", ""))
+        partner_profile_id = partner_prof["id"] if partner_prof else None
+    else:                                          # this user was the REQUESTER
+        res = (supabase.table("requests").select("*")
+               .eq("requester_telegram_user_id", user.id).eq("status", "approved")
+               .order("decided_at", desc=True).limit(1).execute())
+        if res.data:
+            req = res.data[0]
+            partner_profile_id = req.get("profile_id")
+            owner_res = (supabase.table("profiles").select("owner_telegram_user_id")
+                         .eq("id", partner_profile_id).limit(1).execute())
+            partner_tg_id = owner_res.data[0].get("owner_telegram_user_id") if owner_res.data else None
+
+    # 3) reactivate the partner too, free their state, repost, notify gently
+    if partner_profile_id:
+        supabase.table("profiles").update(
+            {"is_active": True, "is_paused": False, "is_matched": False}).eq("id", partner_profile_id).execute()
+        await repost_profile(partner_profile_id, context)
+        if partner_tg_id:
+            supabase.table("user_state").update(
+                {"state": "free", "active_request_id": None}).eq("telegram_user_id", partner_tg_id).execute()
+            try:
+                await context.bot.send_message(
+                    chat_id=partner_tg_id,
+                    text=("Your previous conversation on Mithaq has been closed, and your profile is "
+                          "active again. You're free to express interest in profiles whenever you're "
+                          "ready. 🤲\n\n📢 Browse here: " + CHANNEL_LINK))
+            except Exception as e:
+                logging.warning("Could not notify partner of reactivation: " + str(e))
+
+    # 4) confirm to the user
+    await query.edit_message_text(
+        "Done — you're active again and back in the channel. You can express interest in "
+        "profiles now. May Allah grant you what is best. 🤲\n\n📢 Browse here: " + CHANNEL_LINK)
+
+    # 5) tell admin
+    who = profile_id + ((" & " + partner_profile_id) if partner_profile_id else "")
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_USER_ID,
+        text="🔄 Reactivation via /available — " + who + " are available again (match ended).")
+
+
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or user.id != ADMIN_TELEGRAM_USER_ID:
@@ -1594,6 +1754,7 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     total_profiles = supabase.table("profiles").select("id", count="exact").execute()
     active_profiles = supabase.table("profiles").select("id", count="exact").eq("is_active", True).execute()
     paused_profiles = supabase.table("profiles").select("id", count="exact").eq("is_paused", True).execute()
+    matched_profiles = supabase.table("profiles").select("id", count="exact").eq("is_matched", True).execute()
     pending = supabase.table("requests").select("id", count="exact").eq("status", "pending").execute()
     approved = supabase.table("requests").select("id", count="exact").eq("status", "approved").execute()
     declined = supabase.table("requests").select("id", count="exact").eq("status", "declined").execute()
@@ -1606,6 +1767,7 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "👥 Total profiles: " + str(total_profiles.count),
         "✅ Active profiles: " + str(active_profiles.count),
         "⏸ Paused profiles: " + str(paused_profiles.count),
+        "💬 In conversation (matched): " + str(matched_profiles.count),
         "",
         "🔔 Pending requests: " + str(pending.count),
         "✅ Approved: " + str(approved.count),
@@ -1961,6 +2123,7 @@ def main() -> None:
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CommandHandler("my_request", my_request))
+    app.add_handler(CommandHandler("available", available_command))
     app.add_handler(CommandHandler("add_affiliate", add_affiliate))
     app.add_handler(CommandHandler("affiliate_stats", affiliate_stats))
     app.add_handler(CommandHandler("convert", convert_referral))
@@ -1968,6 +2131,8 @@ def main() -> None:
     app.add_handler(CommandHandler("repost_all", repost_all))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(handle_decline_reason, pattern=r"^dr:"))
+    app.add_handler(CallbackQueryHandler(available_menu, pattern=r"^avail_menu$"))
+    app.add_handler(CallbackQueryHandler(available_callback, pattern=r"^avail_(yes|no):"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw|pause|resume):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text_reason))
 
