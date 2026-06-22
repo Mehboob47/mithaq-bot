@@ -168,21 +168,22 @@ def build_profile_text(p: dict) -> str:
 
     lines.append("")
 
-    if p.get('deen'):             lines.append(f"🕌 Deen: {p['deen']}")
-    if p.get('prayer'):           lines.append(f"🙏 Prayer: {p['prayer']}")
+    if p.get('deen'):             lines.append(f"🕌 Religious practice: {p['deen']}")
+    if p.get('prayer'):           lines.append(f"🙏 Five daily prayers: {p['prayer']}")
     if p.get('madhab'):           lines.append(f"📚 Madhab: {p['madhab']}")
-    if p.get('islamic_classes'):  lines.append(f"📖 Islamic classes: {p['islamic_classes']}")
-    if p.get('revert'):           lines.append(f"🔄 Revert: {p['revert']}")
+    if p.get('revert'):           lines.append(f"🕋 Faith background: {p['revert']}")
 
     lines.append("")
 
-    if p.get('occupation'):       lines.append(f"💼 Occupation: {p['occupation']}")
-    if p.get('education'):        lines.append(f"🎓 Education: {p['education']}")
-    if p.get('languages'):        lines.append(f"🗣️ Languages: {p['languages']}")
-    if p.get('nationality'):      lines.append(f"🌍 Nationality: {p['nationality']}")
-    if p.get('ethnicity'):        lines.append(f"🌺 Ethnicity: {p['ethnicity']}")
-    if p.get('marital_status'):   lines.append(f"💍 Marital Status: {p['marital_status']}")
-    if p.get('children'):         lines.append(f"👶 Children: {p['children']}")
+    if p.get('height'):              lines.append(f"📏 Height: {p['height']}")
+    if p.get('occupation'):          lines.append(f"💼 Occupation: {p['occupation']}")
+    if p.get('education'):           lines.append(f"🎓 Education: {p['education']}")
+    if p.get('languages'):           lines.append(f"🗣️ Languages: {p['languages']}")
+    if p.get('nationality'):         lines.append(f"🌍 Nationality: {p['nationality']}")
+    if p.get('ethnicity'):           lines.append(f"🧬 Ethnicity: {p['ethnicity']}")
+    if p.get('marital_status'):      lines.append(f"💍 Marital status: {p['marital_status']}")
+    if p.get('children'):            lines.append(f"👶 Has children: {p['children']}")
+    if p.get('willing_to_relocate'): lines.append(f"🧳 Willing to relocate: {p['willing_to_relocate']}")
 
     lines.append("")
 
@@ -192,22 +193,14 @@ def build_profile_text(p: dict) -> str:
 
     lines.append("")
 
-    if p.get('personality_traits'): lines.append(f"🌱 Personality Traits: {p['personality_traits']}")
-    if p.get('interests'):          lines.append(f"🎯 Interests: {p['interests']}")
-    if p.get('goals'):              lines.append(f"🏡 Goals: {p['goals']}")
-
-    lines.append("")
-
-    if p.get('looking_for'):      lines.append(f"🔍 Looking for: {p['looking_for']}")
-
-    lines.append("")
-
-    if p.get('spouse_deen_level'): lines.append(f"❤️ Spouse Deen Level: {p['spouse_deen_level']}")
-    if p.get('marriage_dynamic'):  lines.append(f"🤝 Marriage Dynamic: {p['marriage_dynamic']}")
+    if p.get('pref_age_range'):    lines.append(f"🎂 Preferred age: {p['pref_age_range']}")
+    if p.get('spouse_deen_level'): lines.append(f"❤️ Spouse deen level: {p['spouse_deen_level']}")
+    if p.get('marriage_dynamic'):  lines.append(f"🤝 Marriage dynamic: {p['marriage_dynamic']}")
+    if p.get('looking_for'):       lines.append(f"🔍 Looking for: {p['looking_for']}")
 
     if p.get('additional'):
         lines.append("")
-        lines.append(f"📋 Additional: {p['additional']}")
+        lines.append(f"ℹ️ Also worth knowing: {p['additional']}")
 
     return "\n".join(lines)
 
