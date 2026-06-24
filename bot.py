@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
@@ -62,14 +62,17 @@ def profile_button_markup(profile_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def owner_request_markup(request_id: int, requester_has_photo: bool, owner_has_photo: bool) -> InlineKeyboardMarkup:
-    buttons = [
+def owner_request_markup(request_id: int, requester_has_photo: bool, owner_has_photo: bool, include_consider: bool = True) -> InlineKeyboardMarkup:
+    row1 = [
         InlineKeyboardButton("✅ Approve", callback_data="approve:" + str(request_id)),
     ]
     if requester_has_photo and owner_has_photo:
-        buttons.append(InlineKeyboardButton("📷 Approve & Share Photos", callback_data="approve_photo:" + str(request_id)))
-    buttons.append(InlineKeyboardButton("❌ Decline", callback_data="decline:" + str(request_id)))
-    return InlineKeyboardMarkup([buttons])
+        row1.append(InlineKeyboardButton("📷 Approve & Share Photos", callback_data="approve_photo:" + str(request_id)))
+    row1.append(InlineKeyboardButton("❌ Decline", callback_data="decline:" + str(request_id)))
+    rows = [row1]
+    if include_consider:
+        rows.append([InlineKeyboardButton("🤲 I need time to consider", callback_data="consider:" + str(request_id))])
+    return InlineKeyboardMarkup(rows)
 
 
 def admin_request_markup(request_id: int) -> InlineKeyboardMarkup:
@@ -1569,6 +1572,64 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=decline_reason_markup(request_id),
         )
 
+    elif action == "consider":
+        # Owner is taking time to make istikhara / consult. Request stays pending and
+        # open; requester stays held (locked) but may withdraw. A 2-day nudge and a
+        # 5-day auto-expire are handled by the check_consideration job.
+        supabase.table("requests").update({
+            "consideration_started_at": datetime.now(timezone.utc).isoformat(),
+            "consideration_nudge_sent": False,
+            "reminder_sent": True,  # suppress the unrelated 2-hour "still waiting" reminder
+        }).eq("id", request_id).execute()
+
+        requester_profile_c = get_requester_profile(requester_username)
+        requester_has_photo = bool(requester_profile_c.get("photo_url")) if requester_profile_c else False
+        owner_has_photo = bool(owner_photo_url)
+
+        # update the request message to a "considering" status, KEEPING Approve/Decline
+        try:
+            await query.edit_message_text(
+                "⏳ You're taking time to consider this interest for profile " + profile_id + ".\n\n"
+                "The Approve and Decline buttons below remain available whenever you're ready. 🤲",
+                reply_markup=owner_request_markup(request_id, requester_has_photo, owner_has_photo, include_consider=False),
+            )
+        except Exception as e:
+            logging.warning("Could not update consider message: " + str(e))
+
+        # warm, gender-aware confirmation to the owner
+        owner_gender = profile_result.data[0].get("gender", "").lower() if profile_result.data else ""
+        if "sister" in owner_gender or "female" in owner_gender:
+            consult_line = "make istikhara and consult your wali and family"
+            hold_line = "She is taking time to make istikhara and consult her wali before deciding."
+        else:
+            consult_line = "make istikhara and consult your family"
+            hold_line = "He is taking time to make istikhara and consult his family before deciding."
+
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="JazakAllah khayran. Take the time you need to " + consult_line + ". May Allah guide you to what is best. 🤲",
+        )
+
+        # dignified holding message to the requester (still held, may withdraw)
+        try:
+            await context.bot.send_message(
+                chat_id=requester_id,
+                text=(
+                    "JazakAllah khayran for your interest in profile " + profile_id + ". "
+                    + hold_line + " Please be patient — you'll be notified of their response "
+                    "insha'Allah.\n\nYour interest remains held with them. If you'd prefer not to "
+                    "wait, you can withdraw at any time by sending /withdraw. 🤲"
+                ),
+                reply_markup=interest_confirmation_markup(request_id),
+            )
+        except Exception as e:
+            logging.warning("Could not send holding message to requester: " + str(e))
+
+        await context.bot.send_message(
+            chat_id=ADMIN_TELEGRAM_USER_ID,
+            text="⏳ Considering: profile " + profile_id + " request " + str(request_id) + " — owner is taking time to decide.",
+        )
+
 
 # ── /available — let a paused/matched user (and their partner) return ──────────
 
@@ -2094,6 +2155,130 @@ async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
         logging.warning("ERROR in check_pending_reminders: " + str(e))
 
 
+# ── Consideration check: 2-day nudge + 5-day auto-expire (runs every 30 min) ──
+
+async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        now = datetime.now(timezone.utc)
+        two_days_ago = (now - timedelta(days=2)).isoformat()
+        five_days_ago = (now - timedelta(days=5)).isoformat()
+
+        # ── 1) AUTO-EXPIRE anything still pending after 5 days of "considering" ──
+        expired = (
+            supabase.table("requests")
+            .select("*")
+            .eq("status", "pending")
+            .lt("consideration_started_at", five_days_ago)
+            .execute()
+        )
+
+        for req in (expired.data or []):
+            request_id = req["id"]
+            profile_id = req["profile_id"]
+            requester_id = req["requester_telegram_user_id"]
+
+            supabase.table("requests").update({
+                "status": "expired",
+                "decided_at": now.isoformat(),
+            }).eq("id", request_id).execute()
+
+            supabase.table("user_state").update({
+                "active_request_id": None,
+                "state": "free",
+            }).eq("telegram_user_id", requester_id).execute()
+
+            # gentle, blameless close to the requester
+            try:
+                await context.bot.send_message(
+                    chat_id=requester_id,
+                    text=(
+                        "JazakAllah khayran for your interest in profile " + profile_id + " and for your "
+                        "patience. This one didn't move forward to a decision in time, so it has now been "
+                        "closed. You are free to express interest in another profile whenever you're ready. "
+                        "May Allah guide you to what is best for you. 🤲"
+                    ),
+                )
+            except Exception as e:
+                logging.warning("Could not notify requester of expiry: " + str(e))
+
+            # soft note to the owner
+            profile_res = (
+                supabase.table("profiles").select("owner_telegram_user_id")
+                .eq("id", profile_id).limit(1).execute()
+            )
+            owner_tg_id = profile_res.data[0].get("owner_telegram_user_id") if profile_res.data else None
+            if owner_tg_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_tg_id,
+                        text=(
+                            "The interest on your profile " + profile_id + " has now closed as time passed "
+                            "without a decision. No action needed — if it was meant for you, Allah will "
+                            "bring what is best. 🤲"
+                        ),
+                    )
+                except Exception as e:
+                    logging.warning("Could not notify owner of expiry: " + str(e))
+
+            await context.bot.send_message(
+                chat_id=ADMIN_TELEGRAM_USER_ID,
+                text="⌛ Expired: considering request " + str(request_id) + " (profile " + profile_id + ") closed after 5 days.",
+            )
+
+            # bring forward anyone queued on this profile
+            await advance_queue(profile_id, context, repost_if_empty=False)
+
+            logging.info(f"⌛ Auto-expired considering request {request_id} (profile {profile_id})")
+
+        # ── 2) 2-DAY NUDGE for those still considering (and not yet expired) ──
+        nudge = (
+            supabase.table("requests")
+            .select("*")
+            .eq("status", "pending")
+            .eq("consideration_nudge_sent", False)
+            .lt("consideration_started_at", two_days_ago)
+            .gte("consideration_started_at", five_days_ago)
+            .execute()
+        )
+
+        for req in (nudge.data or []):
+            request_id = req["id"]
+            profile_id = req["profile_id"]
+
+            profile_res = (
+                supabase.table("profiles").select("owner_telegram_user_id")
+                .eq("id", profile_id).limit(1).execute()
+            )
+            owner_tg_id = profile_res.data[0].get("owner_telegram_user_id") if profile_res.data else None
+
+            if owner_tg_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_tg_id,
+                        text=(
+                            "🤲 A gentle reminder: you asked for time to consider the interest on your "
+                            "profile " + profile_id + ". Whenever you're ready, the Approve and Decline "
+                            "buttons are still here — no rush, just so it doesn't slip your mind. May Allah "
+                            "guide you to what is best."
+                        ),
+                        reply_markup=admin_request_markup(request_id),
+                    )
+                except Exception as e:
+                    logging.warning("Could not send consideration nudge: " + str(e))
+
+            supabase.table("requests").update({"consideration_nudge_sent": True}).eq("id", request_id).execute()
+
+            await context.bot.send_message(
+                chat_id=ADMIN_TELEGRAM_USER_ID,
+                text="🔔 2-day nudge sent for considering request " + str(request_id) + " (profile " + profile_id + ").",
+            )
+
+            logging.info(f"🔔 Sent 2-day consideration nudge for request {request_id} (profile {profile_id})")
+
+    except Exception as e:
+        logging.warning("ERROR in check_consideration: " + str(e))
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def run_flask():
@@ -2126,11 +2311,12 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_decline_reason, pattern=r"^dr:"))
     app.add_handler(CallbackQueryHandler(available_menu, pattern=r"^avail_menu$"))
     app.add_handler(CallbackQueryHandler(available_callback, pattern=r"^avail_(yes|no):"))
-    app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw|pause|resume):"))
+    app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw|pause|resume|consider):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text_reason))
 
     # Run pending-request reminder check every 30 minutes
     app.job_queue.run_repeating(check_pending_reminders, interval=1800, first=60)
+    app.job_queue.run_repeating(check_consideration, interval=1800, first=90)
 
     print("✅ Mithaq bot is running...")
     app.run_polling()
