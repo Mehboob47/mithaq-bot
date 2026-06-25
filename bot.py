@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
@@ -52,6 +52,37 @@ DECLINE_REASONS = {
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 flask_app = Flask(__name__)
+
+
+# ── Age helper ─────────────────────────────────────────────────────────────────
+
+def calculate_age(dob_value) -> int:
+    """Compute age in whole years from a dob value that may be a string
+    ('1998-09-30', '30/09/1998', etc.) or a date/datetime. Returns an int,
+    or None if the value is missing or cannot be parsed. Guards against
+    nonsense (negative / >120) so a bad dob simply hides the age line."""
+    if not dob_value:
+        return None
+    d = None
+    if isinstance(dob_value, str):
+        s = dob_value.strip()
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y"):
+            try:
+                d = datetime.strptime(s, fmt).date()
+                break
+            except ValueError:
+                continue
+    elif isinstance(dob_value, datetime):
+        d = dob_value.date()
+    elif isinstance(dob_value, date):
+        d = dob_value
+    if not d:
+        return None
+    today = date.today()
+    age = today.year - d.year - ((today.month, today.day) < (d.month, d.day))
+    if age < 0 or age > 120:
+        return None
+    return age
 
 
 # ── Markup helpers ─────────────────────────────────────────────────────────────
@@ -165,7 +196,6 @@ def build_profile_text(p: dict) -> str:
     lines = []
 
     lines.append(f"{gender_emoji} {gender_label} — {p['id']}")
-    lines.append(f"👤 {p.get('display_name', '')}")
     if p.get('city') or p.get('country'):
         lines.append(f"📍 {', '.join(filter(None, [p.get('city'), p.get('country')]))}")
 
@@ -178,6 +208,8 @@ def build_profile_text(p: dict) -> str:
 
     lines.append("")
 
+    _age = calculate_age(p.get('dob'))
+    if _age is not None:             lines.append(f"👤 Age: {_age}")
     if p.get('height'):              lines.append(f"📏 Height: {p['height']}")
     if p.get('occupation'):          lines.append(f"💼 Occupation: {p['occupation']}")
     if p.get('education'):           lines.append(f"🎓 Education: {p['education']}")
