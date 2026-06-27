@@ -54,6 +54,54 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 flask_app = Flask(__name__)
 
 
+# ── Registration code helper ───────────────────────────────────────────────────
+
+import secrets
+
+
+def generate_registration_code() -> str:
+    """Short, unambiguous code like MTHAQ-7X4K. Avoids confusable characters
+    (no 0/O, 1/I/L) so users can't mistype it. Retries until unique."""
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    for _ in range(10):
+        code = "MTHAQ-" + "".join(secrets.choice(alphabet) for _ in range(4))
+        # ensure it's not already issued or already on a profile
+        a = supabase.table("user_state").select("id").eq("issued_code", code).limit(1).execute()
+        b = supabase.table("profiles").select("id").eq("registration_code", code).limit(1).execute()
+        if not a.data and not b.data:
+            return code
+    # extreme fallback — add an extra char
+    return "MTHAQ-" + "".join(secrets.choice(alphabet) for _ in range(6))
+
+
+def link_profile_by_code(profile_row: dict):
+    """Given a freshly-submitted profile row that carries a registration_code,
+    find the Telegram user that the bot issued that code to (stored in
+    user_state.issued_code) and stamp their telegram_user_id onto the profile.
+    Returns the telegram_user_id if linked, else None."""
+    code = (profile_row.get("registration_code") or "").strip()
+    if not code:
+        return None
+    # already linked? leave it
+    if profile_row.get("owner_telegram_user_id"):
+        return profile_row.get("owner_telegram_user_id")
+    st = (
+        supabase.table("user_state")
+        .select("telegram_user_id")
+        .eq("issued_code", code)
+        .limit(1)
+        .execute()
+    )
+    if not st.data:
+        return None
+    tg_id = st.data[0]["telegram_user_id"]
+    supabase.table("profiles").update(
+        {"owner_telegram_user_id": tg_id}
+    ).eq("id", profile_row["id"]).execute()
+    logging.info(f"🔗 Linked {profile_row['id']} to Telegram ID {tg_id} via code {code}")
+    return tg_id
+
+
 # ── Age helper ─────────────────────────────────────────────────────────────────
 
 def calculate_age(dob_value) -> int:
@@ -515,6 +563,13 @@ def post_new_profile():
         return jsonify({"error": f"Profile {profile_id} not found or inactive"}), 404
 
     p = result.data[0]
+
+    # ── Link this profile to the Telegram user who was issued its code ──
+    # (registration code carried from the form → find the telegram id we gave it to)
+    linked_id = link_profile_by_code(p)
+    if linked_id and not p.get("owner_telegram_user_id"):
+        p["owner_telegram_user_id"] = linked_id
+
     text = build_profile_text(p)
     is_new = not p.get("notified")
     if is_new:
@@ -620,30 +675,65 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Retry logic — profile may not be in Supabase yet if /start sent immediately after form submission
+    # ── 1) Already registered? Match by Telegram ID first (most reliable) ──
+    by_id = (
+        supabase.table("profiles")
+        .select("id, owner_telegram_user_id, is_paused, is_matched")
+        .eq("owner_telegram_user_id", user.id)
+        .limit(1)
+        .execute()
+    )
+    if by_id.data:
+        await _show_registered_status(update, by_id.data[0])
+        return
+
     await update.message.reply_text(
         "Assalamu alaikum! 🌸\n\nJazakAllahu khayran — we're setting up your account, please wait a moment insha'Allah..."
     )
+
+    # ── 2) A profile may already carry a code we issued this user, OR match by
+    #       username (legacy). Try a few times in case the form is mid-submit. ──
     profile = None
     for attempt in range(6):
-        result = (
+        # 2a) code we issued to this telegram id, now present on a profile
+        st = (
+            supabase.table("user_state")
+            .select("issued_code")
+            .eq("telegram_user_id", user.id)
+            .limit(1)
+            .execute()
+        )
+        my_code = st.data[0].get("issued_code") if st.data else None
+        if my_code:
+            by_code = (
+                supabase.table("profiles")
+                .select("id, owner_telegram_user_id, is_paused, is_matched")
+                .eq("registration_code", my_code)
+                .limit(1)
+                .execute()
+            )
+            if by_code.data:
+                profile = by_code.data[0]
+                break
+
+        # 2b) legacy fallback: match by username
+        by_name = (
             supabase.table("profiles")
             .select("id, owner_telegram_user_id, is_paused, is_matched")
             .eq("owner_telegram_username", username)
             .limit(1)
             .execute()
         )
-        if result.data:
-            profile = result.data[0]
+        if by_name.data:
+            profile = by_name.data[0]
             break
-        logging.info(f"Profile not found for @{username} — attempt {attempt + 1}/6, retrying in 5s...")
+
+        logging.info(f"No profile yet for @{username} (ID {user.id}) — attempt {attempt + 1}/6")
         await asyncio.sleep(5)
 
     if profile:
         profile_id = profile["id"]
-        is_paused = profile.get("is_paused", False)
-        is_matched = profile.get("is_matched", False)
-
+        # stamp the telegram id on if it's not there (this is the real link)
         if not profile.get("owner_telegram_user_id"):
             supabase.table("profiles").update({
                 "owner_telegram_user_id": user.id
@@ -656,35 +746,52 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             welcome_msg = build_welcome_message(profile_id)
             await update.message.reply_text(
                 welcome_msg,
-                reply_markup=resume_markup(profile_id) if is_paused else pause_markup(profile_id),
+                reply_markup=resume_markup(profile_id) if profile.get("is_paused") else pause_markup(profile_id),
             )
         else:
-            if is_matched:
-                status_text = "💬 You're currently in a conversation through Mithaq, so your profile is on hold."
-                markup = available_menu_markup()
-            elif is_paused:
-                status_text = "⏸ Your profile is currently *paused*."
-                markup = resume_markup(profile_id)
-            else:
-                status_text = "✅ Your profile is currently *active*."
-                markup = pause_markup(profile_id)
-            await update.message.reply_text(
-                "📋 Your profile: *" + profile_id + "*\n\n" + status_text + "\n\n"
-                "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
-                "📌 If you are not receiving notifications, please type /start again.",
-                parse_mode="Markdown",
-                reply_markup=markup,
-            )
+            await _show_registered_status(update, profile)
         return
 
-    # No profile found after all retries — notify user and admin
+    # ── 3) No profile found at all → issue a code so they can finish the form ──
+    code = generate_registration_code()
+    supabase.table("user_state").update(
+        {"issued_code": code}
+    ).eq("telegram_user_id", user.id).execute()
+
     await update.message.reply_text(
-        "JazakAllahu khayran for your patience. We couldn't find your profile just yet — it may still be processing.\n\n"
-        "Please try typing /start again in a few minutes. If the issue persists, contact @MithaqAdmin and we'll get it sorted insha'Allah. 🤲"
+        "Assalamu alaikum! 🌸\n\n"
+        "Here is your Mithaq registration code:\n\n"
+        "🔑 *" + code + "*\n\n"
+        "Please paste this code into the *Telegram Registration Code* box on the "
+        "form, then submit your profile.\n\n"
+        "As soon as your profile is reviewed and posted, this code links it to "
+        "your account here — so you'll receive interest notifications directly. 🤲\n\n"
+        "📝 Haven't filled the form yet? Visit mithaqmarriage.com",
+        parse_mode="Markdown",
     )
-    await context.bot.send_message(
-        chat_id=ADMIN_TELEGRAM_USER_ID,
-        text="⚠️ Profile not found after 6 attempts for @" + username + " (Telegram ID: " + str(user.id) + "). Please investigate.",
+    return
+
+
+async def _show_registered_status(update: Update, profile: dict) -> None:
+    """Show an already-registered user their current profile status."""
+    profile_id = profile["id"]
+    is_paused = profile.get("is_paused", False)
+    is_matched = profile.get("is_matched", False)
+    if is_matched:
+        status_text = "💬 You're currently in a conversation through Mithaq, so your profile is on hold."
+        markup = available_menu_markup()
+    elif is_paused:
+        status_text = "⏸ Your profile is currently *paused*."
+        markup = resume_markup(profile_id)
+    else:
+        status_text = "✅ Your profile is currently *active*."
+        markup = pause_markup(profile_id)
+    await update.message.reply_text(
+        "📋 Your profile: *" + profile_id + "*\n\n" + status_text + "\n\n"
+        "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
+        "📌 If you are not receiving notifications, please type /start again.",
+        parse_mode="Markdown",
+        reply_markup=markup,
     )
 
 
