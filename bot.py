@@ -79,7 +79,7 @@ def link_profile_by_code(profile_row: dict):
     find the Telegram user that the bot issued that code to (stored in
     user_state.issued_code) and stamp their telegram_user_id onto the profile.
     Returns the telegram_user_id if linked, else None."""
-    code = (profile_row.get("registration_code") or "").strip()
+    code = (profile_row.get("registration_code") or "").strip().upper()
     if not code:
         return None
     # already linked? leave it
@@ -535,6 +535,61 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
 @flask_app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
+
+
+@flask_app.route("/verify_code", methods=["POST"])
+def verify_code():
+    """Called by the website form on submit to check a registration code BEFORE
+    saving the profile. Returns {"valid": true} only if the code was genuinely
+    issued by the bot (exists in user_state.issued_code) AND has not already
+    been used on an existing profile (single-use). Otherwise {"valid": false}
+    with a reason. This keeps all Supabase access on the bot side — the form
+    just makes one HTTP call, same as the post_new_profile webhook."""
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({"valid": False, "reason": "no_body"}), 400
+    if data.get("secret") != WEBHOOK_SECRET:
+        return jsonify({"valid": False, "reason": "unauthorised"}), 401
+
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"valid": False, "reason": "empty"}), 200
+
+    # normalise: codes are issued uppercase with MTHAQ- prefix
+    code_norm = code.upper()
+
+    try:
+        # 1) must have been issued by the bot
+        issued = (
+            supabase.table("user_state")
+            .select("telegram_user_id")
+            .eq("issued_code", code_norm)
+            .limit(1)
+            .execute()
+        )
+        if not issued.data:
+            return jsonify({"valid": False, "reason": "not_issued"}), 200
+
+        # 2) must not already be used on a profile (single-use)
+        used = (
+            supabase.table("profiles")
+            .select("id")
+            .eq("registration_code", code_norm)
+            .limit(1)
+            .execute()
+        )
+        if used.data:
+            return jsonify({"valid": False, "reason": "already_used"}), 200
+
+        # valid and unused
+        return jsonify({"valid": True}), 200
+
+    except Exception as e:
+        logging.warning("verify_code error: " + str(e))
+        # On an unexpected error, fail safe by rejecting (better to ask them to
+        # retry than to let an unverified code through).
+        return jsonify({"valid": False, "reason": "error"}), 200
 
 
 @flask_app.route("/post_new_profile", methods=["POST"])
