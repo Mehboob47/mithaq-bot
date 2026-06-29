@@ -102,6 +102,24 @@ def link_profile_by_code(profile_row: dict):
     return tg_id
 
 
+# ── Photo helper ───────────────────────────────────────────────────────────────
+
+def get_photo_ref(profile: dict):
+    """Return the best photo reference for a profile, or None.
+    Prefers the Telegram file_id (new, private method); falls back to the
+    legacy photo_url for existing users. Telegram's send_photo accepts either,
+    so callers can pass the result straight to photo=."""
+    if not profile:
+        return None
+    file_id = (profile.get("photo_file_id") or "").strip()
+    if file_id:
+        return file_id
+    url = (profile.get("photo_url") or "").strip()
+    if url:
+        return url
+    return None
+
+
 # ── Age helper ─────────────────────────────────────────────────────────────────
 
 def calculate_age(dob_value) -> int:
@@ -222,6 +240,7 @@ def build_welcome_message(profile_id: str) -> str:
         "📢 Browse profiles and express interest here: " + CHANNEL_LINK + "\n\n"
         "📌 You can pause your profile at any time using the button below.\n\n"
         "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
+        "📷 Optional: you can add a photo to share *privately* with someone only after you both approve interest — it's never shown publicly or in the channel. Just type /addphoto anytime. You're always in control. 🤲\n\n"
         "Questions? Contact @MithaqAdmin 🤲\n\n"
         "May Allah make it easy for you 🤲"
     )
@@ -473,7 +492,7 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
     if profile_result.data:
         owner_tg_id = profile_result.data[0].get("owner_telegram_user_id")
         owner_username = profile_result.data[0].get("owner_telegram_username", "")
-        owner_photo_url = profile_result.data[0].get("photo_url")
+        owner_photo_url = get_photo_ref(profile_result.data[0])
 
     await context.bot.send_message(
         chat_id=next_requester_id,
@@ -487,7 +506,7 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
 
     requester_profile = get_requester_profile(next_username)
     requester_profile_id = requester_profile["id"] if requester_profile else None
-    requester_photo_url = requester_profile["photo_url"] if requester_profile else None
+    requester_photo_url = get_photo_ref(requester_profile)
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
 
     requester_has_photo = bool(requester_photo_url)
@@ -733,7 +752,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # ── 1) Already registered? Match by Telegram ID first (most reliable) ──
     by_id = (
         supabase.table("profiles")
-        .select("id, owner_telegram_user_id, is_paused, is_matched")
+        .select("id, owner_telegram_user_id, is_paused, is_matched, photo_file_id, photo_url")
         .eq("owner_telegram_user_id", user.id)
         .limit(1)
         .execute()
@@ -762,7 +781,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if my_code:
             by_code = (
                 supabase.table("profiles")
-                .select("id, owner_telegram_user_id, is_paused, is_matched")
+                .select("id, owner_telegram_user_id, is_paused, is_matched, photo_file_id, photo_url")
                 .eq("registration_code", my_code)
                 .limit(1)
                 .execute()
@@ -774,7 +793,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # 2b) legacy fallback: match by username
         by_name = (
             supabase.table("profiles")
-            .select("id, owner_telegram_user_id, is_paused, is_matched")
+            .select("id, owner_telegram_user_id, is_paused, is_matched, photo_file_id, photo_url")
             .eq("owner_telegram_username", username)
             .limit(1)
             .execute()
@@ -841,10 +860,17 @@ async def _show_registered_status(update: Update, profile: dict) -> None:
     else:
         status_text = "✅ Your profile is currently *active*."
         markup = pause_markup(profile_id)
+
+    # Gentle, one-line photo reminder — only if they have no photo yet.
+    photo_line = ""
+    if not get_photo_ref(profile):
+        photo_line = "\n\n📷 You haven't added a photo yet. If you'd like to, type /addphoto — it's optional, and only ever shared privately on mutual approval."
+
     await update.message.reply_text(
         "📋 Your profile: *" + profile_id + "*\n\n" + status_text + "\n\n"
         "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
-        "📌 If you are not receiving notifications, please type /start again.",
+        "📌 If you are not receiving notifications, please type /start again."
+        + photo_line,
         parse_mode="Markdown",
         reply_markup=markup,
     )
@@ -1294,7 +1320,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     request_id = request_result.data[0]["id"]
 
     requester_profile_id = requester_profile["id"] if requester_profile else None
-    requester_photo_url = requester_profile.get("photo_url") if requester_profile else None
+    requester_photo_url = get_photo_ref(requester_profile)
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
 
     requester_has_photo = bool(requester_photo_url)
@@ -1463,6 +1489,158 @@ async def handle_free_text_reason(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text("❌ Decline sent with your reason. JazakAllahu khayran.")
 
 
+# ── Photo feature ──────────────────────────────────────────────────────────────
+
+PHOTO_INTRO = (
+    "📷 *Adding your photo*\n\n"
+    "Before you send it, here's exactly how your photo is used:\n\n"
+    "• It is *never* shown publicly or posted in the channel.\n"
+    "• It is only ever shared *privately with one person*, and only when you *both* approve interest and *both* choose to share — it's always mutual, never one-sided.\n"
+    "• Even after you add it, approving someone does *not* automatically share it — you choose \"Approve & Share Photos\" each time, or approve without sharing.\n"
+    "• Your photo isn't posted to any public link or website — it stays within Telegram.\n"
+    "• You can remove it anytime with /removephoto.\n\n"
+    "If you're happy with that, send me the photo now. Or send /cancel to stop. 🤲"
+)
+
+
+def _get_user_profile_by_tg(tg_id: int):
+    """Find the profile owned by this Telegram user (by ID, the reliable key)."""
+    res = (
+        supabase.table("profiles")
+        .select("id, owner_telegram_user_id, photo_file_id, photo_url")
+        .eq("owner_telegram_user_id", tg_id)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+async def addphoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not update.message:
+        return
+
+    # Must own a profile to attach a photo to it.
+    profile = _get_user_profile_by_tg(user.id)
+    if not profile:
+        await update.message.reply_text(
+            "I couldn't find your profile yet. Please make sure you've completed the form and sent /start first. 🤲"
+        )
+        return
+
+    # Mark this user as awaiting a photo, preserving their current state so a
+    # queued/locked status isn't lost. Stored as "awaiting_photo|<prev_state>".
+    st = (
+        supabase.table("user_state")
+        .select("state")
+        .eq("telegram_user_id", user.id)
+        .limit(1)
+        .execute()
+    )
+    prev_state = (st.data[0].get("state") if st.data else "free") or "free"
+    if prev_state.startswith("awaiting_photo"):
+        prev_state = prev_state.split("|", 1)[1] if "|" in prev_state else "free"
+
+    supabase.table("user_state").update(
+        {"state": "awaiting_photo|" + prev_state}
+    ).eq("telegram_user_id", user.id).execute()
+
+    await update.message.reply_text(PHOTO_INTRO, parse_mode="Markdown")
+
+
+async def removephoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not update.message:
+        return
+
+    profile = _get_user_profile_by_tg(user.id)
+    if not profile:
+        await update.message.reply_text(
+            "I couldn't find your profile yet. Please send /start first. 🤲"
+        )
+        return
+
+    supabase.table("profiles").update(
+        {"photo_file_id": None}
+    ).eq("id", profile["id"]).execute()
+
+    # Note: we only clear the Telegram file_id. Legacy photo_url (if any) is left
+    # as-is; if you want to clear that too, it can be added here.
+    await update.message.reply_text(
+        "✅ Your Telegram photo has been removed. You can add one again anytime with /addphoto. 🤲"
+    )
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    st = (
+        supabase.table("user_state")
+        .select("state")
+        .eq("telegram_user_id", user.id)
+        .limit(1)
+        .execute()
+    )
+    state = (st.data[0].get("state") if st.data else "") or ""
+    if state.startswith("awaiting_photo"):
+        prev = state.split("|", 1)[1] if "|" in state else "free"
+        supabase.table("user_state").update(
+            {"state": prev}
+        ).eq("telegram_user_id", user.id).execute()
+        await update.message.reply_text("No problem — photo upload cancelled. 🤲")
+    else:
+        await update.message.reply_text("Nothing to cancel. 🤲")
+
+
+async def handle_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Capture a photo sent by a user who is in the awaiting_photo state, store
+    its Telegram file_id on their profile, and restore their previous state."""
+    user = update.effective_user
+    if not user or not update.message or not update.message.photo:
+        return
+
+    st = (
+        supabase.table("user_state")
+        .select("state")
+        .eq("telegram_user_id", user.id)
+        .limit(1)
+        .execute()
+    )
+    state = (st.data[0].get("state") if st.data else "") or ""
+    if not state.startswith("awaiting_photo"):
+        # Not in the photo flow — ignore stray photos quietly.
+        return
+
+    profile = _get_user_profile_by_tg(user.id)
+    if not profile:
+        await update.message.reply_text(
+            "I couldn't find your profile to attach this to. Please send /start first. 🤲"
+        )
+        return
+
+    # The largest available size is the last entry in update.message.photo.
+    file_id = update.message.photo[-1].file_id
+
+    supabase.table("profiles").update(
+        {"photo_file_id": file_id}
+    ).eq("id", profile["id"]).execute()
+
+    # Restore the user's previous state.
+    prev = state.split("|", 1)[1] if "|" in state else "free"
+    supabase.table("user_state").update(
+        {"state": prev}
+    ).eq("telegram_user_id", user.id).execute()
+
+    await update.message.reply_text(
+        "✅ JazakAllahu khayran — your photo has been saved.\n\n"
+        "Remember: it stays private and is only ever shared when you both approve "
+        "*and* you choose to share it. You're always in control — change it anytime "
+        "with /addphoto, or remove it with /removephoto. 🤲",
+        parse_mode="Markdown",
+    )
+
+
 async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
@@ -1597,10 +1775,12 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     owner_tg_id = None
     owner_username = ""
     owner_photo_url = None
+    owner_profile_full = None
     if profile_result.data:
+        owner_profile_full = profile_result.data[0]
         owner_tg_id = profile_result.data[0].get("owner_telegram_user_id")
         owner_username = profile_result.data[0].get("owner_telegram_username", "")
-        owner_photo_url = profile_result.data[0].get("photo_url")
+        owner_photo_url = get_photo_ref(profile_result.data[0])
 
     is_admin = user.id == ADMIN_TELEGRAM_USER_ID
     is_owner = (owner_tg_id and user.id == owner_tg_id) or (user.username and user.username.lower() == owner_username.lower())
@@ -1701,19 +1881,20 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if share_photos:
             requester_profile = get_requester_profile(requester_username)
-            requester_photo_url = requester_profile.get("photo_url") if requester_profile else None
+            requester_photo = get_photo_ref(requester_profile)
+            owner_photo = owner_photo_url  # already resolved via get_photo_ref above
 
-            if requester_photo_url and owner_photo_url:
+            if requester_photo and owner_photo:
                 try:
                     await context.bot.send_photo(
                         chat_id=requester_id,
-                        photo=owner_photo_url,
+                        photo=owner_photo,
                         caption="📷 Photo shared by profile " + profile_id,
                     )
                     if owner_tg_id:
                         await context.bot.send_photo(
                             chat_id=owner_tg_id,
-                            photo=requester_photo_url,
+                            photo=requester_photo,
                             caption="📷 Photo shared by the person interested in your profile",
                         )
                 except Exception as e:
@@ -1777,7 +1958,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         }).eq("id", request_id).execute()
 
         requester_profile_c = get_requester_profile(requester_username)
-        requester_has_photo = bool(requester_profile_c.get("photo_url")) if requester_profile_c else False
+        requester_has_photo = bool(get_photo_ref(requester_profile_c))
         owner_has_photo = bool(owner_photo_url)
 
         # update the request message to a "considering" status, KEEPING Approve/Decline
@@ -2204,7 +2385,7 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     requester_profile = get_requester_profile(requester_username)
     requester_profile_id = requester_profile["id"] if requester_profile else None
-    requester_photo_url = requester_profile.get("photo_url") if requester_profile else None
+    requester_photo_url = get_photo_ref(requester_profile)
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
 
     requester_has_photo = bool(requester_photo_url)
@@ -2501,11 +2682,15 @@ def main() -> None:
     app.add_handler(CommandHandler("convert", convert_referral))
     app.add_handler(CommandHandler("resend_requests", resend_requests))
     app.add_handler(CommandHandler("repost_all", repost_all))
+    app.add_handler(CommandHandler("addphoto", addphoto_command))
+    app.add_handler(CommandHandler("removephoto", removephoto_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(handle_decline_reason, pattern=r"^dr:"))
     app.add_handler(CallbackQueryHandler(available_menu, pattern=r"^avail_menu$"))
     app.add_handler(CallbackQueryHandler(available_callback, pattern=r"^avail_(yes|no):"))
     app.add_handler(CallbackQueryHandler(handle_decision, pattern=r"^(approve|approve_photo|decline|withdraw|pause|resume|consider):"))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text_reason))
 
     # Run pending-request reminder check every 30 minutes
