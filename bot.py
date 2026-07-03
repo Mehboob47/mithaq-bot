@@ -510,7 +510,7 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
     owner_photo_url = None
     if profile_result.data:
         owner_tg_id = profile_result.data[0].get("owner_telegram_user_id")
-        owner_username = profile_result.data[0].get("owner_telegram_username", "")
+        owner_username = (profile_result.data[0].get("owner_telegram_username") or "")
         owner_photo_url = get_photo_ref(profile_result.data[0])
 
     await context.bot.send_message(
@@ -682,7 +682,7 @@ def post_new_profile():
     supabase.table("profiles").update({"notified": True}).eq("id", profile_id).execute()
 
     owner_tg_id = p.get("owner_telegram_user_id")
-    owner_username = p.get("owner_telegram_username", "")
+    owner_username = (p.get("owner_telegram_username") or "")
     if is_new:
         welcome_msg = build_welcome_message(profile_id)
         if owner_tg_id:
@@ -1162,7 +1162,7 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if is_new:
         owner_tg_id = p.get("owner_telegram_user_id")
-        owner_username = p.get("owner_telegram_username", "")
+        owner_username = (p.get("owner_telegram_username") or "")
         welcome_msg = build_welcome_message(profile_id)
         sent = False
         if owner_tg_id:
@@ -1404,7 +1404,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    owner_username = profile.get("owner_telegram_username", "")
+    owner_username = (profile.get("owner_telegram_username") or "")
     owner_tg_id = profile.get("owner_telegram_user_id")
     owner_photo_url = profile.get("photo_url")
 
@@ -1910,7 +1910,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     requester_id = req["requester_telegram_user_id"]
-    requester_username = req.get("requester_username", "")
+    requester_username = (req.get("requester_username") or "")
     profile_id = req["profile_id"]
 
     profile_result = (
@@ -1928,7 +1928,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if profile_result.data:
         owner_profile_full = profile_result.data[0]
         owner_tg_id = profile_result.data[0].get("owner_telegram_user_id")
-        owner_username = profile_result.data[0].get("owner_telegram_username", "")
+        owner_username = (profile_result.data[0].get("owner_telegram_username") or "")
         owner_photo_url = get_photo_ref(profile_result.data[0])
 
     is_admin = user.id == ADMIN_TELEGRAM_USER_ID
@@ -1956,7 +1956,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         gender = p.get("gender", "").lower()
         phone = p.get("phone", "")
         wali = p.get("wali_contact", "")
-        tg_username = p.get("owner_telegram_username", "")
+        tg_username = (p.get("owner_telegram_username") or "")
 
         if "sister" in gender or "female" in gender:
             contact_msg = (
@@ -2530,7 +2530,7 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     req = pending_requests.data[0]
     request_id = req["id"]
-    requester_username = req.get("requester_username", "")
+    requester_username = (req.get("requester_username") or "")
 
     requester_profile = get_requester_profile(requester_username)
     requester_profile_id = requester_profile["id"] if requester_profile else None
@@ -2630,7 +2630,7 @@ async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
         for req in result.data:
             request_id = req["id"]
             profile_id = req["profile_id"]
-            requester_username = req.get("requester_username", "")
+            requester_username = (req.get("requester_username") or "")
 
             profile_result = (
                 supabase.table("profiles")
