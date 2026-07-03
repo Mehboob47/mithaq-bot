@@ -761,23 +761,90 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _show_registered_status(update, by_id.data[0])
         return
 
+    # ── 2) Quick single check: does a profile already match this username?
+    #       (legacy path — user filled the form before pressing /start.) If so,
+    #       we may need the retry loop in case the form is mid-submit. If NOT,
+    #       this is a brand-new code-first user and we issue the code instantly
+    #       with no waiting. ──
+    by_name_now = (
+        supabase.table("profiles")
+        .select("id, owner_telegram_user_id, is_paused, is_matched, photo_file_id, photo_url")
+        .eq("owner_telegram_username", username)
+        .limit(1)
+        .execute()
+    )
+
+    # Has this user already been issued a code before (e.g. pressing /start again)?
+    st_now = (
+        supabase.table("user_state")
+        .select("issued_code")
+        .eq("telegram_user_id", user.id)
+        .limit(1)
+        .execute()
+    )
+    existing_code = st_now.data[0].get("issued_code") if st_now.data else None
+
+    is_legacy_pending = bool(by_name_now.data) or bool(existing_code)
+
+    if not is_legacy_pending:
+        # ── 3) BRAND-NEW code-first user → issue a code IMMEDIATELY (no 30s wait) ──
+        try:
+            code = generate_registration_code()
+            supabase.table("user_state").update(
+                {"issued_code": code}
+            ).eq("telegram_user_id", user.id).execute()
+
+            await update.message.reply_text(
+                "Assalamu alaikum! 🌸\n\n"
+                "Here is your Mithaq registration code:\n\n"
+                "🔑 `" + code + "`\n\n"
+                "Please paste this code into the *Telegram Registration Code* box on the "
+                "form, then submit your profile.\n\n"
+                "As soon as your profile is reviewed and posted, this code links it to "
+                "your account here — so you'll receive interest notifications directly. 🤲\n\n"
+                "📝 Haven't filled the form yet? Visit mithaqmarriage.com",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            # Never leave the user hanging silently — tell them, and alert admin.
+            logging.warning("Could not issue registration code: " + str(e))
+            try:
+                await update.message.reply_text(
+                    "Assalamu alaikum! 🌸\n\n"
+                    "Something went wrong while setting up your registration code. "
+                    "Please try /start again in a moment, or contact @MithaqAdmin and "
+                    "we'll sort it out for you insha'Allah. 🤲"
+                )
+            except Exception:
+                pass
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_TELEGRAM_USER_ID,
+                    text="⚠️ Code issuance FAILED for @" + username + " (ID " + str(user.id) + "): " + str(e),
+                )
+            except Exception:
+                pass
+        return
+
+    # ── LEGACY PATH: a username-matched or already-coded user may have a profile
+    #    arriving via the form right now. Acknowledge, then retry a few times. ──
     await update.message.reply_text(
         "Assalamu alaikum! 🌸\n\nJazakAllahu khayran — we're setting up your account, please wait a moment insha'Allah..."
     )
 
-    # ── 2) A profile may already carry a code we issued this user, OR match by
-    #       username (legacy). Try a few times in case the form is mid-submit. ──
     profile = None
     for attempt in range(6):
         # 2a) code we issued to this telegram id, now present on a profile
-        st = (
-            supabase.table("user_state")
-            .select("issued_code")
-            .eq("telegram_user_id", user.id)
-            .limit(1)
-            .execute()
-        )
-        my_code = st.data[0].get("issued_code") if st.data else None
+        my_code = existing_code
+        if not my_code:
+            st = (
+                supabase.table("user_state")
+                .select("issued_code")
+                .eq("telegram_user_id", user.id)
+                .limit(1)
+                .execute()
+            )
+            my_code = st.data[0].get("issued_code") if st.data else None
         if my_code:
             by_code = (
                 supabase.table("profiles")
@@ -826,23 +893,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_registered_status(update, profile)
         return
 
-    # ── 3) No profile found at all → issue a code so they can finish the form ──
-    code = generate_registration_code()
-    supabase.table("user_state").update(
-        {"issued_code": code}
-    ).eq("telegram_user_id", user.id).execute()
+    # ── 3b) Still no profile (username-matched user whose row never arrived, OR
+    #        a re-/start where the coded profile isn't posted yet) → re-show the
+    #        code they already have, or issue one, so they can finish the form. ──
+    try:
+        code = existing_code or generate_registration_code()
+        if not existing_code:
+            supabase.table("user_state").update(
+                {"issued_code": code}
+            ).eq("telegram_user_id", user.id).execute()
 
-    await update.message.reply_text(
-        "Assalamu alaikum! 🌸\n\n"
-        "Here is your Mithaq registration code:\n\n"
-        "🔑 *" + code + "*\n\n"
-        "Please paste this code into the *Telegram Registration Code* box on the "
-        "form, then submit your profile.\n\n"
-        "As soon as your profile is reviewed and posted, this code links it to "
-        "your account here — so you'll receive interest notifications directly. 🤲\n\n"
-        "📝 Haven't filled the form yet? Visit mithaqmarriage.com",
-        parse_mode="Markdown",
-    )
+        await update.message.reply_text(
+            "Assalamu alaikum! 🌸\n\n"
+            "Here is your Mithaq registration code:\n\n"
+            "🔑 `" + code + "`\n\n"
+            "Please paste this code into the *Telegram Registration Code* box on the "
+            "form, then submit your profile.\n\n"
+            "As soon as your profile is reviewed and posted, this code links it to "
+            "your account here — so you'll receive interest notifications directly. 🤲\n\n"
+            "📝 Haven't filled the form yet? Visit mithaqmarriage.com",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logging.warning("Could not issue registration code (legacy path): " + str(e))
+        try:
+            await update.message.reply_text(
+                "Assalamu alaikum! 🌸\n\n"
+                "Something went wrong while setting up your registration code. "
+                "Please try /start again in a moment, or contact @MithaqAdmin and "
+                "we'll sort it out for you insha'Allah. 🤲"
+            )
+        except Exception:
+            pass
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_TELEGRAM_USER_ID,
+                text="⚠️ Code issuance FAILED (legacy) for @" + username + " (ID " + str(user.id) + "): " + str(e),
+            )
+        except Exception:
+            pass
     return
 
 
