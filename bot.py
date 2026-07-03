@@ -240,9 +240,26 @@ def build_welcome_message(profile_id: str) -> str:
         "📢 Browse profiles and express interest here: " + CHANNEL_LINK + "\n\n"
         "📌 You can pause your profile at any time using the button below.\n\n"
         "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
-        "📷 Optional: you can add a photo to share *privately* with someone only after you both approve interest — it's never shown publicly or in the channel. Just type /addphoto anytime. You're always in control. 🤲\n\n"
         "Questions? Contact @MithaqAdmin 🤲\n\n"
         "May Allah make it easy for you 🤲"
+    )
+
+
+# Standalone photo invitation — sent as its own message right after the welcome,
+# so it stands out instead of being buried at the bottom of a long message.
+def build_photo_invite_message() -> str:
+    return (
+        "📷 *Optional: add a private photo*\n\n"
+        "You can add a photo that is shared *privately* with someone — and only "
+        "after you *both* approve interest and *both* choose to share it. It's "
+        "never shown publicly or in the channel, and you're always in control.\n\n"
+        "To add one now, just tap the button below or type /addphoto anytime. 🤲"
+    )
+
+
+def photo_invite_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📷 Add a private photo", callback_data="addphoto_start")]]
     )
 
 
@@ -268,13 +285,7 @@ def build_profile_text(p: dict) -> str:
 
     lines.append("")
 
-    if p.get('deen'):             lines.append(f"🕌 Religious practice: {p['deen']}")
-    if p.get('prayer'):           lines.append(f"🙏 Five daily prayers: {p['prayer']}")
-    if p.get('madhab'):           lines.append(f"📚 Madhab: {p['madhab']}")
-    if p.get('revert'):           lines.append(f"🕋 Faith background: {p['revert']}")
-
-    lines.append("")
-
+    # ── Personal details first ──
     _age = calculate_age(p.get('dob'))
     if _age is not None:             lines.append(f"👤 Age: {_age}")
     if p.get('height'):              lines.append(f"📏 Height: {p['height']}")
@@ -286,6 +297,14 @@ def build_profile_text(p: dict) -> str:
     if p.get('marital_status'):      lines.append(f"💍 Marital status: {p['marital_status']}")
     if p.get('children'):            lines.append(f"👶 Has children: {p['children']}")
     if p.get('willing_to_relocate'): lines.append(f"🧳 Willing to relocate: {p['willing_to_relocate']}")
+
+    lines.append("")
+
+    # ── Religious details second ──
+    if p.get('deen'):             lines.append(f"🕌 Religious practice: {p['deen']}")
+    if p.get('prayer'):           lines.append(f"🙏 Five daily prayers: {p['prayer']}")
+    if p.get('madhab'):           lines.append(f"📚 Madhab: {p['madhab']}")
+    if p.get('revert'):           lines.append(f"🕋 Faith background: {p['revert']}")
 
     lines.append("")
 
@@ -674,6 +693,14 @@ def post_new_profile():
                     ]]
                 }
             )
+            # Standalone photo invite, so it isn't buried in the welcome message.
+            send_telegram_message(str(owner_tg_id), build_photo_invite_message(),
+                reply_markup={
+                    "inline_keyboard": [[
+                        {"text": "📷 Add a private photo", "callback_data": "addphoto_start"}
+                    ]]
+                }
+            )
         else:
             send_telegram_message(
                 str(ADMIN_TELEGRAM_USER_ID),
@@ -888,6 +915,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(
                 welcome_msg,
                 reply_markup=resume_markup(profile_id) if profile.get("is_paused") else pause_markup(profile_id),
+            )
+            # Standalone photo invite so it isn't buried in the welcome message.
+            await update.message.reply_text(
+                build_photo_invite_message(),
+                parse_mode="Markdown",
+                reply_markup=photo_invite_markup(),
             )
         else:
             await _show_registered_status(update, profile)
@@ -1138,6 +1171,13 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     chat_id=owner_tg_id,
                     text=welcome_msg,
                     reply_markup=pause_markup(profile_id),
+                )
+                # Standalone photo invite so it isn't buried in the welcome message.
+                await context.bot.send_message(
+                    chat_id=owner_tg_id,
+                    text=build_photo_invite_message(),
+                    parse_mode="Markdown",
+                    reply_markup=photo_invite_markup(),
                 )
                 sent = True
             except Exception as e:
@@ -1604,15 +1644,14 @@ def _get_user_profile_by_tg(tg_id: int):
     return res.data[0] if res.data else None
 
 
-async def addphoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user or not update.message:
-        return
-
+async def _begin_addphoto(user, send) -> None:
+    """Shared logic for starting the photo flow, used by both the /addphoto
+    command and the 'Add a private photo' button. `send` is an async callable
+    that takes (text, **kwargs) and delivers a message to the user."""
     # Must own a profile to attach a photo to it.
     profile = _get_user_profile_by_tg(user.id)
     if not profile:
-        await update.message.reply_text(
+        await send(
             "I couldn't find your profile yet. Please make sure you've completed the form and sent /start first. 🤲"
         )
         return
@@ -1634,7 +1673,28 @@ async def addphoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         {"state": "awaiting_photo|" + prev_state}
     ).eq("telegram_user_id", user.id).execute()
 
-    await update.message.reply_text(PHOTO_INTRO, parse_mode="Markdown")
+    await send(PHOTO_INTRO, parse_mode="Markdown")
+
+
+async def addphoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    await _begin_addphoto(user, update.message.reply_text)
+
+
+async def addphoto_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Add a private photo' button on the welcome photo invite."""
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user:
+        return
+    await query.answer()
+
+    async def send(text, **kwargs):
+        await context.bot.send_message(chat_id=user.id, text=text, **kwargs)
+
+    await _begin_addphoto(user, send)
 
 
 async def removephoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2772,6 +2832,7 @@ def main() -> None:
     app.add_handler(CommandHandler("resend_requests", resend_requests))
     app.add_handler(CommandHandler("repost_all", repost_all))
     app.add_handler(CommandHandler("addphoto", addphoto_command))
+    app.add_handler(CallbackQueryHandler(addphoto_button, pattern=r"^addphoto_start$"))
     app.add_handler(CommandHandler("removephoto", removephoto_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
