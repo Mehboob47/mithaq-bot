@@ -66,7 +66,7 @@ def generate_registration_code() -> str:
     for _ in range(10):
         code = "MTHAQ-" + "".join(secrets.choice(alphabet) for _ in range(4))
         # ensure it's not already issued or already on a profile
-        a = supabase.table("user_state").select("id").eq("issued_code", code).limit(1).execute()
+        a = supabase.table("user_state").select("telegram_user_id").eq("issued_code", code).limit(1).execute()
         b = supabase.table("profiles").select("id").eq("registration_code", code).limit(1).execute()
         if not a.data and not b.data:
             return code
@@ -725,7 +725,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         existing_state = (
             supabase.table("user_state")
-            .select("id")
+            .select("telegram_user_id")
             .eq("telegram_user_id", user.id)
             .limit(1)
             .execute()
@@ -1173,7 +1173,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         user_started = (
             supabase.table("user_state")
-            .select("id")
+            .select("telegram_user_id")
             .eq("telegram_user_id", user.id)
             .limit(1)
             .execute()
