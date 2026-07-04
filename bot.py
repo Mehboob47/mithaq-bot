@@ -274,7 +274,7 @@ def build_profile_text(p: dict) -> str:
             lines = lines[1:]
         return "\n".join(lines)
 
-    gender = p.get("gender", "").lower()
+    gender = (p.get("gender") or "").lower()
     gender_emoji = "🟣" if ("female" in gender or "sister" in gender) else "🔵"
     gender_label = "SISTER" if ("female" in gender or "sister" in gender) else "BROTHER"
 
@@ -379,6 +379,45 @@ def get_requester_profile(username: str) -> dict:
 
 
 # ── Complete decline helper ────────────────────────────────────────────────────
+
+def format_contact_details(profile: dict):
+    """Build the contact-details lines for a profile being shared on approval.
+    Returns (lines, wali_missing):
+      - lines: the formatted contact text (may be "" if a sister has no wali)
+      - wali_missing: True if this is a sister with no usable wali contact, so
+        the caller should hold the exchange and alert admin instead of sending.
+    Sisters share wali only. Brothers share their direct contact AND (if present)
+    their female relative as first point of contact. All fields NULL-safe."""
+    p = profile or {}
+    gender = (p.get("gender") or "").lower()
+    is_sister = ("sister" in gender or "female" in gender)
+
+    if is_sister:
+        wali = (p.get("wali_contact") or "").strip()
+        no_wali = bool(p.get("no_wali"))
+        if not wali or no_wali:
+            # No usable wali → signal caller to hold & route to admin.
+            return "", True
+        return "👤 Wali contact: " + wali, False
+
+    # Brother → direct contact plus optional female-relative contact.
+    tg = (p.get("owner_telegram_username") or "").strip()
+    phone = (p.get("phone") or "").strip()
+    female = (p.get("female_family_contact") or "").strip()
+
+    direct_bits = []
+    if tg:
+        direct_bits.append("@" + tg)
+    if phone:
+        direct_bits.append(phone)
+    direct = " / ".join(direct_bits) if direct_bits else "(not provided)"
+
+    lines = "📞 Him directly: " + direct
+    if female:
+        lines += ("\n👩 His female relative (first point of contact): " + female +
+                  "\nYou're welcome to make first contact through his female relative if you prefer.")
+    return lines, False
+
 
 async def complete_decline(request_id: int, user, context, reason_text: str) -> None:
     req_result = (
@@ -2034,31 +2073,43 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         }).eq("telegram_user_id", requester_id).execute()
 
         p = profile_result.data[0] if profile_result.data else {}
-        gender = p.get("gender", "").lower()
-        phone = p.get("phone", "")
-        wali = p.get("wali_contact", "")
-        tg_username = (p.get("owner_telegram_username") or "")
 
-        if "sister" in gender or "female" in gender:
-            contact_msg = (
+        contact_lines, wali_missing = format_contact_details(p)
+
+        if wali_missing:
+            # Sister has no usable wali → don't send broken details. Tell the
+            # requester it's being arranged, and alert admin to sort it out.
+            hold_msg = (
                 "Alhamdulillah! Your interest in profile " + profile_id + " has been approved. 🤲\n\n"
-                "Here are their contact details:\n"
-                "Wali Contact: " + wali + "\n\n"
-                "Please contact the wali to proceed insha'Allah.\n\n"
+                "This sister does not currently have a wali on file, so Mithaq is helping "
+                "arrange the introduction. You'll be contacted with the wali details shortly "
+                "insha'Allah — no action needed from you right now.\n\n"
                 "May Allah make it easy for you both. 🤲"
             )
+            await context.bot.send_message(chat_id=requester_id, text=hold_msg)
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_TELEGRAM_USER_ID,
+                    text=("⚠️ WALI NEEDED — profile " + profile_id + " approved a match but has "
+                          "NO wali contact (no_wali/blank). Requester @" +
+                          str(req.get("requester_username", requester_id)) + " is waiting.\n\n"
+                          "Arrange the wali contact, then run:\n"
+                          "/set_wali " + profile_id + " <number>\n"
+                          "…to send it to the waiting requester."),
+                )
+            except Exception as e:
+                logging.warning("Could not send wali-needed admin alert: " + str(e))
         else:
             contact_msg = (
                 "Alhamdulillah! Your interest in profile " + profile_id + " has been approved. 🤲\n\n"
                 "Here are their contact details:\n"
-                "Telegram: @" + tg_username + "\n"
-                "Phone: " + phone + "\n\n"
+                + contact_lines + "\n\n"
                 "May Allah make it easy for you both. 🤲"
+                "\n\n📌 When you're ready to return to searching, tap the button below or send /available."
             )
+            await context.bot.send_message(
+                chat_id=requester_id, text=contact_msg, reply_markup=available_menu_markup())
 
-        contact_msg += "\n\n📌 When you're ready to return to searching, tap the button below or send /available."
-        await context.bot.send_message(
-            chat_id=requester_id, text=contact_msg, reply_markup=available_menu_markup())
 
         requester_profile_full = get_requester_profile(requester_username)
 
@@ -2070,33 +2121,43 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 {"is_paused": True, "is_matched": True}).eq("id", requester_profile_full["id"]).execute()
 
         if requester_profile_full and owner_tg_id:
-            req_gender = requester_profile_full.get("gender", "").lower()
-            req_phone = requester_profile_full.get("phone", "")
-            req_wali = requester_profile_full.get("wali_contact", "")
-            req_tg_username = requester_profile_full.get("owner_telegram_username", "")
-            req_profile_id = requester_profile_full.get("id", "")
+            req_profile_id = (requester_profile_full.get("id") or "")
+            req_lines, req_wali_missing = format_contact_details(requester_profile_full)
 
-            if "sister" in req_gender or "female" in req_gender:
-                owner_contact_msg = (
-                    "✅ You approved the interest from " + req_profile_id + ". Contact details have been exchanged.\n\n"
-                    "Here are their contact details:\n"
-                    "Wali Contact: " + req_wali + "\n\n"
-                    "May Allah make it easy for you both. 🤲"
-                )
+            if req_wali_missing:
+                # The requester is a sister with no wali → hold their side too.
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_tg_id,
+                        text=("✅ You approved the interest from " + req_profile_id + ".\n\n"
+                              "She does not currently have a wali on file, so Mithaq is helping "
+                              "arrange the introduction — you'll be contacted with the details "
+                              "shortly insha'Allah.\n\nMay Allah make it easy for you both. 🤲"),
+                    )
+                except Exception as e:
+                    logging.warning("Could not send hold message to owner: " + str(e))
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_TELEGRAM_USER_ID,
+                        text=("⚠️ WALI NEEDED — requester " + req_profile_id + " (a sister) has NO "
+                              "wali contact. Owner of " + profile_id + " is waiting.\n\n"
+                              "Arrange it, then run:\n/set_wali " + req_profile_id + " <number>"),
+                    )
+                except Exception as e:
+                    logging.warning("Could not send wali-needed admin alert (owner side): " + str(e))
             else:
                 owner_contact_msg = (
                     "✅ You approved the interest from " + req_profile_id + ". Contact details have been exchanged.\n\n"
                     "Here are their contact details:\n"
-                    "Telegram: @" + req_tg_username + "\n"
-                    "Phone: " + req_phone + "\n\n"
+                    + req_lines + "\n\n"
                     "May Allah make it easy for you both. 🤲"
+                    "\n\n📌 When you're ready to return to searching, tap the button below or send /available."
                 )
-            owner_contact_msg += "\n\n📌 When you're ready to return to searching, tap the button below or send /available."
-            try:
-                await context.bot.send_message(
-                    chat_id=owner_tg_id, text=owner_contact_msg, reply_markup=available_menu_markup())
-            except Exception as e:
-                logging.warning("Could not send requester contact to owner: " + str(e))
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_tg_id, text=owner_contact_msg, reply_markup=available_menu_markup())
+                except Exception as e:
+                    logging.warning("Could not send requester contact to owner: " + str(e))
         elif owner_tg_id:
             try:
                 await context.bot.send_message(
@@ -2202,7 +2263,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             logging.warning("Could not update consider message: " + str(e))
 
         # warm, gender-aware confirmation to the owner
-        owner_gender = profile_result.data[0].get("gender", "").lower() if profile_result.data else ""
+        owner_gender = (profile_result.data[0].get("gender") or "").lower() if profile_result.data else ""
         if "sister" in owner_gender or "female" in owner_gender:
             consult_line = "make istikhara and consult your wali and family"
             hold_line = "She is taking time to make istikhara and consult her wali before deciding."
@@ -2402,6 +2463,94 @@ async def unlock_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     }).eq("telegram_user_id", target_id).execute()
 
     await update.message.reply_text("User " + str(target_id) + " has been unlocked.")
+
+
+async def set_wali(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: fill in a missing wali contact for a sister's profile and, if
+    someone is waiting on an approved match with her, release the details now."""
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /set_wali MTHAQ-217 +447700900123")
+        return
+
+    profile_id = context.args[0].strip()
+    wali_number = " ".join(context.args[1:]).strip()
+
+    # 1) Save the wali contact (and clear the no_wali flag).
+    prof = (
+        supabase.table("profiles").select("*").eq("id", profile_id).limit(1).execute()
+    )
+    if not prof.data:
+        await update.message.reply_text("Profile " + profile_id + " not found.")
+        return
+
+    supabase.table("profiles").update(
+        {"wali_contact": wali_number, "no_wali": False}
+    ).eq("id", profile_id).execute()
+
+    # 2) Find an approved match this sister is part of, to release the details.
+    #    She may be the OWNER (a brother approved into her) or the REQUESTER.
+    released_to = []
+
+    # 2a) She is the owner → the requester on the approved request is waiting.
+    as_owner = (
+        supabase.table("requests").select("*")
+        .eq("profile_id", profile_id).eq("status", "approved")
+        .order("decided_at", desc=True).limit(1).execute()
+    )
+    if as_owner.data:
+        waiting_id = as_owner.data[0].get("requester_telegram_user_id")
+        if waiting_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=waiting_id,
+                    text=("Alhamdulillah — the wali contact for profile " + profile_id +
+                          " is now available. 🤲\n\n"
+                          "Here are their contact details:\n"
+                          "👤 Wali contact: " + wali_number + "\n\n"
+                          "May Allah make it easy for you both. 🤲"),
+                )
+                released_to.append(str(waiting_id))
+            except Exception as e:
+                logging.warning("Could not release wali to waiting requester: " + str(e))
+
+    # 2b) She is the requester → the owner she was approved into is waiting.
+    as_req = (
+        supabase.table("requests").select("*")
+        .eq("requester_username", (prof.data[0].get("owner_telegram_username") or "").lower())
+        .eq("status", "approved").order("decided_at", desc=True).limit(1).execute()
+    )
+    if as_req.data:
+        owner_profile_id = as_req.data[0].get("profile_id")
+        owner_res = (
+            supabase.table("profiles").select("owner_telegram_user_id")
+            .eq("id", owner_profile_id).limit(1).execute()
+        )
+        owner_wid = owner_res.data[0].get("owner_telegram_user_id") if owner_res.data else None
+        if owner_wid:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_wid,
+                    text=("Alhamdulillah — the wali contact for " + profile_id +
+                          " (who expressed interest in your profile) is now available. 🤲\n\n"
+                          "Here are their contact details:\n"
+                          "👤 Wali contact: " + wali_number + "\n\n"
+                          "May Allah make it easy for you both. 🤲"),
+                )
+                released_to.append(str(owner_wid))
+            except Exception as e:
+                logging.warning("Could not release wali to waiting owner: " + str(e))
+
+    if released_to:
+        await update.message.reply_text(
+            "✅ Wali contact saved for " + profile_id + " and sent to the waiting party.")
+    else:
+        await update.message.reply_text(
+            "✅ Wali contact saved for " + profile_id + ". (No one currently waiting on an approved match.)")
 
 
 async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2914,6 +3063,7 @@ def main() -> None:
     app.add_handler(CommandHandler("bump", bump_profile))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("unlock", unlock_user))
+    app.add_handler(CommandHandler("set_wali", set_wali))
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CommandHandler("my_request", my_request))
