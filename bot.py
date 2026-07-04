@@ -249,17 +249,18 @@ def build_welcome_message(profile_id: str) -> str:
 # so it stands out instead of being buried at the bottom of a long message.
 def build_photo_invite_message() -> str:
     return (
-        "📷 *Optional: add a private photo*\n\n"
-        "You can add a photo that is shared *privately* with someone — and only "
-        "after you *both* approve interest and *both* choose to share it. It's "
-        "never shown publicly or in the channel, and you're always in control.\n\n"
-        "To add one now, just tap the button below or type /addphoto anytime. 🤲"
+        "📷 Would you like to add a private photo now?\n\n"
+        "_Private — only ever shared privately on mutual approval, never shown "
+        "publicly or in the channel._"
     )
 
 
 def photo_invite_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📷 Add a private photo", callback_data="addphoto_start")]]
+        [[
+            InlineKeyboardButton("✅ Yes, add a photo", callback_data="addphoto_start"),
+            InlineKeyboardButton("Not now", callback_data="addphoto_notnow"),
+        ]]
     )
 
 
@@ -531,7 +532,18 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
     requester_has_photo = bool(requester_photo_url)
     owner_has_photo = bool(owner_photo_url)
 
-    photo_line = "\n📷 They have a photo to share." if requester_has_photo else "\n📷 They have not uploaded a photo."
+    if requester_has_photo and owner_has_photo:
+        photo_line = ("\n📷 Both of you have added a photo. When you approve, you can choose "
+                      "\"Approve & Share Photos\" to exchange them — or approve without sharing. "
+                      "Photos are only ever swapped when you both approve and both choose to share.")
+    elif requester_has_photo and not owner_has_photo:
+        photo_line = ("\n📷 They have added a photo. Photos are only shared when *both* sides have one "
+                      "and both approve — so to enable photo sharing, add yours anytime with /addphoto.")
+    elif not requester_has_photo and owner_has_photo:
+        photo_line = ("\n📷 They have not added a photo. Photos are only ever shared when *both* sides have "
+                      "one and both approve — so there is nothing to exchange unless they add one too.")
+    else:
+        photo_line = "\n📷 Neither of you has added a photo. Photos are optional and only ever shared privately when both sides add one and both approve."
 
     request_text = (
         "New Interest Request for your profile " + profile_id + "\n\n"
@@ -697,7 +709,8 @@ def post_new_profile():
             send_telegram_message(str(owner_tg_id), build_photo_invite_message(),
                 reply_markup={
                     "inline_keyboard": [[
-                        {"text": "📷 Add a private photo", "callback_data": "addphoto_start"}
+                        {"text": "✅ Yes, add a photo", "callback_data": "addphoto_start"},
+                        {"text": "Not now", "callback_data": "addphoto_notnow"},
                     ]]
                 }
             )
@@ -768,7 +781,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not username:
         await update.message.reply_text(
-            "Assalamu alaikum! 🌸\n\n"
+            "Assalamu alaikum!\n\n"
             "⚠️ We noticed you don't have a Telegram username set.\n\n"
             "To use Mithaq you need a Telegram username.\n\n"
             "📱 Go to: Settings → tap your name → Username → set one\n\n"
@@ -828,8 +841,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Please paste this code into the *Telegram Registration Code* box on the "
                 "form, then submit your profile.\n\n"
                 "As soon as your profile is reviewed and posted, this code links it to "
-                "your account here — so you'll receive interest notifications directly. 🤲\n\n"
-                "📝 Haven't filled the form yet? Visit mithaqmarriage.com",
+                "your account here — so you'll receive interest notifications directly. 🤲",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -837,7 +849,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logging.warning("Could not issue registration code: " + str(e))
             try:
                 await update.message.reply_text(
-                    "Assalamu alaikum! 🌸\n\n"
+                    "Assalamu alaikum!\n\n"
                     "Something went wrong while setting up your registration code. "
                     "Please try /start again in a moment, or contact @MithaqAdmin and "
                     "we'll sort it out for you insha'Allah. 🤲"
@@ -856,7 +868,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # ── LEGACY PATH: a username-matched or already-coded user may have a profile
     #    arriving via the form right now. Acknowledge, then retry a few times. ──
     await update.message.reply_text(
-        "Assalamu alaikum! 🌸\n\nJazakAllahu khayran — we're setting up your account, please wait a moment insha'Allah..."
+        "Assalamu alaikum!\n\nJazakAllahu khayran — we're setting up your account, please wait a moment insha'Allah..."
     )
 
     profile = None
@@ -943,15 +955,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Please paste this code into the *Telegram Registration Code* box on the "
             "form, then submit your profile.\n\n"
             "As soon as your profile is reviewed and posted, this code links it to "
-            "your account here — so you'll receive interest notifications directly. 🤲\n\n"
-            "📝 Haven't filled the form yet? Visit mithaqmarriage.com",
+            "your account here — so you'll receive interest notifications directly. 🤲",
             parse_mode="Markdown",
         )
     except Exception as e:
         logging.warning("Could not issue registration code (legacy path): " + str(e))
         try:
             await update.message.reply_text(
-                "Assalamu alaikum! 🌸\n\n"
+                "Assalamu alaikum!\n\n"
                 "Something went wrong while setting up your registration code. "
                 "Please try /start again in a moment, or contact @MithaqAdmin and "
                 "we'll sort it out for you insha'Allah. 🤲"
@@ -1279,7 +1290,10 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not query or not user or not query.data:
         return
 
-    _, profile_id = query.data.split(":", 1)
+    prefix, profile_id = query.data.split(":", 1)
+    # Arriving via "interest_confirm:" means they already saw & accepted the
+    # photo gate, so don't show it again.
+    skip_photo_gate = (prefix == "interest_confirm")
 
     if not user.username:
         await query.answer(
@@ -1355,6 +1369,33 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
         except Exception:
             pass
+        return
+
+    # ── Photo gate: if this requester has a photo on file, make sure they
+    #    understand it may be exchanged before their interest is registered.
+    #    Skipped when they arrive via the confirm button (already acknowledged). ──
+    if not skip_photo_gate and get_photo_ref(requester_profile):
+        await query.answer()
+        try:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    "📷 *About your photo*\n\n"
+                    "You've added a photo. If this person approves and chooses to share "
+                    "photos, yours will be sent to them then — and you'll receive theirs at "
+                    "the same time. It's always mutual, and you won't be asked again at that "
+                    "point.\n\n"
+                    "Your photo is never shown publicly or in the channel."
+                ),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ I understand — express interest",
+                                         callback_data="interest_confirm:" + profile_id),
+                    InlineKeyboardButton("❌ Cancel", callback_data="interest_cancel"),
+                ]]),
+            )
+        except Exception as e:
+            logging.warning("Could not send photo gate: " + str(e))
         return
 
     state_result = (
@@ -1484,7 +1525,18 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             reply_markup=interest_confirmation_markup(request_id),
         )
 
-        photo_line = "\n📷 They have a photo to share." if requester_has_photo else "\n📷 They have not uploaded a photo."
+        if requester_has_photo and owner_has_photo:
+            photo_line = ("\n📷 Both of you have added a photo. When you approve, you can choose "
+                          "\"Approve & Share Photos\" to exchange them — or approve without sharing. "
+                          "Photos are only ever swapped when you both approve and both choose to share.")
+        elif requester_has_photo and not owner_has_photo:
+            photo_line = ("\n📷 They have added a photo. Photos are only shared when *both* sides have one "
+                          "and both approve — so to enable photo sharing, add yours anytime with /addphoto.")
+        elif not requester_has_photo and owner_has_photo:
+            photo_line = ("\n📷 They have not added a photo. Photos are only ever shared when *both* sides have "
+                          "one and both approve — so there is nothing to exchange unless they add one too.")
+        else:
+            photo_line = "\n📷 Neither of you has added a photo. Photos are optional and only ever shared privately when both sides add one and both approve."
 
         request_text = (
             "New Interest Request for your profile " + profile_id + "\n\n"
@@ -1695,6 +1747,35 @@ async def addphoto_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await context.bot.send_message(chat_id=user.id, text=text, **kwargs)
 
     await _begin_addphoto(user, send)
+
+
+async def addphoto_notnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Not now' button on the photo invite."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    try:
+        await query.edit_message_text(
+            "No problem — you can add a private photo anytime with /addphoto. 🤲"
+        )
+    except Exception:
+        pass
+
+
+async def interest_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles 'Cancel' on the express-interest photo gate."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    try:
+        await query.edit_message_text(
+            "No problem — your interest was not sent, and your photo has not been shared. "
+            "You can express interest anytime. 🤲"
+        )
+    except Exception:
+        pass
 
 
 async def removephoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2540,7 +2621,18 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     requester_has_photo = bool(requester_photo_url)
     owner_has_photo = bool(owner_photo_url)
 
-    photo_line = "\n📷 They have a photo to share." if requester_has_photo else "\n📷 They have not uploaded a photo."
+    if requester_has_photo and owner_has_photo:
+        photo_line = ("\n📷 Both of you have added a photo. When you approve, you can choose "
+                      "\"Approve & Share Photos\" to exchange them — or approve without sharing. "
+                      "Photos are only ever swapped when you both approve and both choose to share.")
+    elif requester_has_photo and not owner_has_photo:
+        photo_line = ("\n📷 They have added a photo. Photos are only shared when *both* sides have one "
+                      "and both approve — so to enable photo sharing, add yours anytime with /addphoto.")
+    elif not requester_has_photo and owner_has_photo:
+        photo_line = ("\n📷 They have not added a photo. Photos are only ever shared when *both* sides have "
+                      "one and both approve — so there is nothing to exchange unless they add one too.")
+    else:
+        photo_line = "\n📷 Neither of you has added a photo. Photos are optional and only ever shared privately when both sides add one and both approve."
 
     request_text = (
         "New Interest Request for your profile " + profile_id + "\n\n"
@@ -2833,9 +2925,12 @@ def main() -> None:
     app.add_handler(CommandHandler("repost_all", repost_all))
     app.add_handler(CommandHandler("addphoto", addphoto_command))
     app.add_handler(CallbackQueryHandler(addphoto_button, pattern=r"^addphoto_start$"))
+    app.add_handler(CallbackQueryHandler(addphoto_notnow, pattern=r"^addphoto_notnow$"))
     app.add_handler(CommandHandler("removephoto", removephoto_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
+    app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest_confirm:"))
+    app.add_handler(CallbackQueryHandler(interest_cancel, pattern=r"^interest_cancel$"))
     app.add_handler(CallbackQueryHandler(handle_decline_reason, pattern=r"^dr:"))
     app.add_handler(CallbackQueryHandler(available_menu, pattern=r"^avail_menu$"))
     app.add_handler(CallbackQueryHandler(available_callback, pattern=r"^avail_(yes|no):"))
