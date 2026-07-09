@@ -1571,18 +1571,12 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             photo_line = "\n📷 Neither of you has added a photo. Photos are optional and only ever shared privately when both sides add one and both approve."
 
+        # ── Owner notification (best-effort) ──
         request_text = (
-            "New Interest Request for your profile " + profile_id + "\n\n"
-            + requester_profile_text + " has expressed interest in your profile."
-            + photo_line + "\n\n"
+            "New Interest Request for your profile " + str(profile_id) + "\n\n"
+            + str(requester_profile_text) + " has expressed interest in your profile."
+            + str(photo_line) + "\n\n"
             "Please tap Approve or Decline below."
-        )
-
-        admin_text = (
-            "🔔 New Interest Request\n\n"
-            "Profile: " + profile_id + "\n"
-            "From: @" + str(user.username or user.id) + " (" + requester_profile_text + ")\n"
-            "Owner: @" + owner_username
         )
 
         sent_to_owner = False
@@ -1597,13 +1591,44 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             except Exception as e:
                 logging.warning("Could not message owner: " + str(e))
 
-        admin_text += "\n\n✅ Request sent to owner. You can also approve/decline below." if sent_to_owner else "\n\n⚠️ Owner not registered — approve/decline below."
+        # ── Admin notification (ALWAYS fires, no matter what happened above) ──
+        # This is the safety net: if the owner isn't linked (NULL owner) or the
+        # owner send failed, the interest must still reach admin so it's never lost.
+        try:
+            if sent_to_owner:
+                owner_status = "\n\n✅ Request sent to owner. You can also approve/decline below."
+            elif not owner_tg_id:
+                owner_status = ("\n\n⚠️ OWNER NOT LINKED — this profile owner has not activated "
+                                "their bot, so they could NOT be notified. Please handle this "
+                                "request via the buttons below, or contact them directly.")
+            else:
+                owner_status = "\n\n⚠️ Owner send FAILED — please approve/decline below."
 
-        await context.bot.send_message(
-            chat_id=ADMIN_TELEGRAM_USER_ID,
-            text=admin_text,
-            reply_markup=admin_request_markup(request_id),
-        )
+            admin_text = (
+                "🔔 New Interest Request\n\n"
+                "Profile: " + str(profile_id) + "\n"
+                "From: @" + str(user.username or user.id) + " (" + str(requester_profile_text) + ")\n"
+                "Owner: @" + str(owner_username or "(no username)")
+                + owner_status
+            )
+            await context.bot.send_message(
+                chat_id=ADMIN_TELEGRAM_USER_ID,
+                text=admin_text,
+                reply_markup=admin_request_markup(request_id),
+            )
+        except Exception as e:
+            # Even if building/sending the rich admin message fails, get SOMETHING to admin.
+            logging.warning("Admin notification build failed: " + str(e))
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_TELEGRAM_USER_ID,
+                    text=("🔔 New interest on " + str(profile_id) + " (request " + str(request_id)
+                          + ") — details failed to render, please check. Owner linked: "
+                          + ("yes" if owner_tg_id else "NO")),
+                    reply_markup=admin_request_markup(request_id),
+                )
+            except Exception as e2:
+                logging.warning("Fallback admin notification ALSO failed: " + str(e2))
 
     else:
         if state_result.data:
