@@ -1540,10 +1540,10 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             }).execute()
 
         await query.answer(
-            ("✅ Interest sent! You will be notified of the response insha'Allah."
-             + ("\n\n📷 You've added a photo. If they approve and choose to share, it will be "
-                "exchanged privately with each other only — never shown publicly."
-                if requester_has_photo else "")),
+            ("✅ Interest sent! You'll be notified of their response insha'Allah."
+             + ("\n\n📷 Your photo is shared only if you both approve — never public."
+                if requester_has_photo else "")
+             + "\n\n↩️ To cancel: tap Withdraw in the message the bot just sent you."),
             show_alert=True,
         )
 
@@ -1645,9 +1645,9 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         await query.answer(
             ("✅ You've been added to the queue for this profile insha'Allah."
-             + ("\n\n📷 You've added a photo. If they approve and choose to share, it will be "
-                "exchanged privately with each other only — never shown publicly."
-                if requester_has_photo else "")),
+             + ("\n\n📷 Your photo is shared only if you both approve — never public."
+                if requester_has_photo else "")
+             + "\n\n↩️ To leave: tap Withdraw in the message the bot just sent you."),
             show_alert=True,
         )
 
