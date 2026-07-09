@@ -1346,9 +1346,8 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     prefix, profile_id = query.data.split(":", 1)
-    # Arriving via "interest_confirm:" means they already saw & accepted the
-    # photo gate, so don't show it again.
-    skip_photo_gate = (prefix == "interest_confirm")
+    # (interest_confirm: is a legacy path kept for any in-flight buttons; it
+    #  now behaves identically to interest: since the blocking gate was removed.)
 
     if not user.username:
         await query.answer(
@@ -1426,32 +1425,8 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             pass
         return
 
-    # ── Photo gate: if this requester has a photo on file, make sure they
-    #    understand it may be exchanged before their interest is registered.
-    #    Skipped when they arrive via the confirm button (already acknowledged). ──
-    if not skip_photo_gate and get_photo_ref(requester_profile):
-        await query.answer()
-        try:
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=(
-                    "📷 *About your photo*\n\n"
-                    "You've added a photo. If this person approves and chooses to share "
-                    "photos, yours will be sent to them then — and you'll receive theirs at "
-                    "the same time. It's always mutual, and you won't be asked again at that "
-                    "point.\n\n"
-                    "Your photo is never shown publicly or in the channel."
-                ),
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ I understand — express interest",
-                                         callback_data="interest_confirm:" + profile_id),
-                    InlineKeyboardButton("❌ Cancel", callback_data="interest_cancel"),
-                ]]),
-            )
-        except Exception as e:
-            logging.warning("Could not send photo gate: " + str(e))
-        return
+    # ── Photo note is now shown in the "interest sent" popup (below), so a
+    #    photo-having user gets it right there in the channel — no blocking DM. ──
 
     state_result = (
         supabase.table("user_state")
@@ -1565,7 +1540,10 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             }).execute()
 
         await query.answer(
-            "✅ Interest sent! You will be notified of the response insha'Allah.",
+            ("✅ Interest sent! You will be notified of the response insha'Allah."
+             + ("\n\n📷 You've added a photo. If they approve and choose to share, it will be "
+                "exchanged privately with each other only — never shown publicly."
+                if requester_has_photo else "")),
             show_alert=True,
         )
 
@@ -1641,7 +1619,10 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             }).execute()
 
         await query.answer(
-            "✅ You've been added to the queue for this profile insha'Allah.",
+            ("✅ You've been added to the queue for this profile insha'Allah."
+             + ("\n\n📷 You've added a photo. If they approve and choose to share, it will be "
+                "exchanged privately with each other only — never shown publicly."
+                if requester_has_photo else "")),
             show_alert=True,
         )
 
