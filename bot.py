@@ -352,7 +352,15 @@ def send_telegram_message(chat_id: str, text: str, reply_markup: dict = None) ->
 
 # ── Helper: look up a requester's own profile ─────────────────────────────────
 
-def get_requester_profile_id(username: str) -> str:
+def get_requester_profile_id(username: str, tg_id: int = None) -> str:
+    # Prefer the reliable Telegram ID; fall back to username (legacy).
+    if tg_id:
+        r = (
+            supabase.table("profiles").select("id")
+            .eq("owner_telegram_user_id", tg_id).limit(1).execute()
+        )
+        if r.data:
+            return r.data[0]["id"]
     if not username:
         return None
     result = (
@@ -365,7 +373,15 @@ def get_requester_profile_id(username: str) -> str:
     return result.data[0]["id"] if result.data else None
 
 
-def get_requester_profile(username: str) -> dict:
+def get_requester_profile(username: str, tg_id: int = None) -> dict:
+    # Prefer the reliable Telegram ID; fall back to username (legacy).
+    if tg_id:
+        r = (
+            supabase.table("profiles").select("*")
+            .eq("owner_telegram_user_id", tg_id).limit(1).execute()
+        )
+        if r.data:
+            return r.data[0]
     if not username:
         return None
     result = (
@@ -563,7 +579,7 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
         reply_markup=interest_confirmation_markup(next_request_id),
     )
 
-    requester_profile = get_requester_profile(next_username)
+    requester_profile = get_requester_profile(next_username, next_requester_id)
     requester_profile_id = requester_profile["id"] if requester_profile else None
     requester_photo_url = get_photo_ref(requester_profile)
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
@@ -1391,7 +1407,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as e:
         logging.warning("Could not check channel membership: " + str(e))
 
-    requester_profile = get_requester_profile(user.username)
+    requester_profile = get_requester_profile(user.username, user.id)
     if not requester_profile:
         await query.answer(
             "You need a Mithaq profile to express interest. Visit mithaqmarriage.com to submit yours.",
@@ -2111,7 +2127,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 chat_id=requester_id, text=contact_msg, reply_markup=available_menu_markup())
 
 
-        requester_profile_full = get_requester_profile(requester_username)
+        requester_profile_full = get_requester_profile(requester_username, requester_id)
 
         # ── take BOTH parties out of circulation while they talk ──
         supabase.table("profiles").update(
@@ -2171,7 +2187,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 logging.warning("Could not send confirmation to owner: " + str(e))
 
         if share_photos:
-            requester_profile = get_requester_profile(requester_username)
+            requester_profile = get_requester_profile(requester_username, requester_id)
             requester_photo = get_photo_ref(requester_profile)
             owner_photo = owner_photo_url  # already resolved via get_photo_ref above
 
@@ -2248,7 +2264,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "reminder_sent": True,  # suppress the unrelated 2-hour "still waiting" reminder
         }).eq("id", request_id).execute()
 
-        requester_profile_c = get_requester_profile(requester_username)
+        requester_profile_c = get_requester_profile(requester_username, requester_id)
         requester_has_photo = bool(get_photo_ref(requester_profile_c))
         owner_has_photo = bool(owner_photo_url)
 
@@ -2376,7 +2392,7 @@ async def available_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if res.data:                                   # this user was the OWNER
         req = res.data[0]
         partner_tg_id = req.get("requester_telegram_user_id")
-        partner_prof = get_requester_profile(req.get("requester_username", ""))
+        partner_prof = get_requester_profile(req.get("requester_username", ""), req.get("requester_telegram_user_id"))
         partner_profile_id = partner_prof["id"] if partner_prof else None
     else:                                          # this user was the REQUESTER
         res = (supabase.table("requests").select("*")
@@ -2762,7 +2778,7 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     request_id = req["id"]
     requester_username = (req.get("requester_username") or "")
 
-    requester_profile = get_requester_profile(requester_username)
+    requester_profile = get_requester_profile(requester_username, req.get("requester_telegram_user_id"))
     requester_profile_id = requester_profile["id"] if requester_profile else None
     requester_photo_url = get_photo_ref(requester_profile)
     requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Anonymous"
@@ -2888,7 +2904,7 @@ async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             owner_tg_id = profile.get("owner_telegram_user_id")
             owner_email = profile.get("email")
 
-            requester_profile = get_requester_profile(requester_username)
+            requester_profile = get_requester_profile(requester_username, req.get("requester_telegram_user_id"))
             requester_profile_id = requester_profile["id"] if requester_profile else None
             requester_profile_text = "Profile " + requester_profile_id if requester_profile_id else "Someone"
 
