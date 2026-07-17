@@ -99,6 +99,20 @@ def link_profile_by_code(profile_row: dict):
         {"owner_telegram_user_id": tg_id}
     ).eq("id", profile_row["id"]).execute()
     logging.info(f"🔗 Linked {profile_row['id']} to Telegram ID {tg_id} via code {code}")
+
+    # Tell admin — this is the path most signups take (code -> form -> webhook),
+    # and it previously fired no notification at all.
+    try:
+        uname = (profile_row.get("owner_telegram_username") or "").strip()
+        send_telegram_message(
+            str(ADMIN_TELEGRAM_USER_ID),
+            "✅ Profile linked: " + str(profile_row["id"])
+            + (" @" + uname if uname else "")
+            + " (ID " + str(tg_id) + ") — now receiving notifications."
+        )
+    except Exception as e:
+        logging.warning("Could not send profile-linked admin ping: " + str(e))
+
     return tg_id
 
 
@@ -751,6 +765,22 @@ def post_new_profile():
     owner_tg_id = p.get("owner_telegram_user_id")
     owner_username = (p.get("owner_telegram_username") or "")
     if is_new:
+        # ── Admin: a new profile has gone live. Fires on SUCCESS, not just failure. ──
+        try:
+            gender = (p.get("gender") or "").strip() or "?"
+            city = (p.get("city") or "").strip()
+            country = (p.get("country") or "").strip()
+            where = ", ".join([x for x in (city, country) if x]) or "location not given"
+            send_telegram_message(
+                str(ADMIN_TELEGRAM_USER_ID),
+                "📥 New profile posted: " + str(profile_id) + "\n"
+                + gender + " · " + where + "\n"
+                + ("Linked ✅ @" + owner_username if owner_tg_id and owner_username
+                   else ("Linked ✅ (no username)" if owner_tg_id else "⚠️ NOT LINKED — owner will not receive notifications"))
+            )
+        except Exception as e:
+            logging.warning("Could not send new-profile admin ping: " + str(e))
+
         welcome_msg = build_welcome_message(profile_id)
         if owner_tg_id:
             send_telegram_message(str(owner_tg_id), welcome_msg,
@@ -774,6 +804,13 @@ def post_new_profile():
                 str(ADMIN_TELEGRAM_USER_ID),
                 "Could not send welcome to owner of " + profile_id + " (@" + owner_username + ") — they may not have started the bot yet."
             )
+
+        # ── Welcome email (best-effort; never blocks the posting) ──
+        owner_email = (p.get("email") or "").strip()
+        if owner_email:
+            send_welcome_email(owner_email, profile_id)
+        else:
+            logging.info(f"No email on {profile_id} — welcome email skipped.")
 
     logging.info(f"Auto-posted profile {profile_id} to channel.")
     return jsonify({"ok": True, "profile_id": profile_id}), 200
@@ -2824,6 +2861,59 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # ── Email helper (SendGrid) ────────────────────────────────────────────────────
+
+def _send_email(to_email: str, subject: str, body: str, label: str = "email") -> bool:
+    """Shared SendGrid sender. Returns True on success, False on any failure.
+    Never raises — email is best-effort and must never break the caller."""
+    if not SENDGRID_API_KEY or not to_email:
+        return False
+    payload = {
+        "personalizations": [{"to": [{"email": to_email}]}],
+        "from": {"email": "info@mithaqmarriage.com", "name": "Mithaq Marriage"},
+        "reply_to": {"email": "info@mithaqmarriage.com", "name": "Mithaq Marriage"},
+        "subject": subject,
+        "content": [{"type": "text/plain", "value": body}],
+    }
+    try:
+        resp = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={
+                "Authorization": "Bearer " + SENDGRID_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code == 202:
+            return True
+        logging.warning(f"SendGrid {label} failed: {resp.status_code} — {resp.text}")
+        return False
+    except Exception as e:
+        logging.warning("Could not send " + label + ": " + str(e))
+        return False
+
+
+def send_welcome_email(to_email: str, profile_id: str) -> bool:
+    """Sent once, when a profile first goes live in the channel.
+    Its real job is to get Telegram notifications switched on."""
+    subject = "Your Mithaq profile is live — " + str(profile_id)
+    body = (
+        "Assalamu alaikum,\n\n"
+        "Your profile (" + str(profile_id) + ") is now live in the Mithaq channel.\n\n"
+        "ONE THING TO CHECK\n"
+        "Please make sure Telegram notifications are switched on for the Mithaq bot. "
+        "That is how you will hear when someone expresses interest in you — and it is "
+        "easy to miss if the chat is muted.\n\n"
+        "Browse profiles here:\n" + CHANNEL_LINK + "\n\n"
+        "You can pause your profile, add a photo, or check your requests at any time "
+        "in the bot.\n\n"
+        "May Allah make it easy for you.\n\n"
+        "The Mithaq Team\n"
+        "info@mithaqmarriage.com\n"
+        "mithaqmarriage.com"
+    )
+    return _send_email(to_email, subject, body, "welcome email")
+
 
 def send_reminder_email(to_email: str, profile_id: str, requester_profile_text: str) -> bool:
     if not SENDGRID_API_KEY or not to_email:
