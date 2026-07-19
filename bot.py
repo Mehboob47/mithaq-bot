@@ -2547,15 +2547,21 @@ async def set_wali(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Profile " + profile_id + " not found.")
         return
 
+    sister_tg_id = prof.data[0].get("owner_telegram_user_id")
+
     supabase.table("profiles").update(
         {"wali_contact": wali_number, "no_wali": False}
     ).eq("id", profile_id).execute()
 
     # 2) Find an approved match this sister is part of, to release the details.
     #    She may be the OWNER (a brother approved into her) or the REQUESTER.
+    #    Both lookups use the reliable Telegram ID / profile ID — never the
+    #    username, which is stored with original casing on requests and is often
+    #    blank on code-first profiles. That username mismatch was why the release
+    #    silently failed and the waiting party was never sent the details.
     released_to = []
 
-    # 2a) She is the owner → the requester on the approved request is waiting.
+    # 2a) She is the OWNER → the requester on the approved request is waiting.
     as_owner = (
         supabase.table("requests").select("*")
         .eq("profile_id", profile_id).eq("status", "approved")
@@ -2577,32 +2583,36 @@ async def set_wali(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as e:
                 logging.warning("Could not release wali to waiting requester: " + str(e))
 
-    # 2b) She is the requester → the owner she was approved into is waiting.
-    as_req = (
-        supabase.table("requests").select("*")
-        .eq("requester_username", (prof.data[0].get("owner_telegram_username") or "").lower())
-        .eq("status", "approved").order("decided_at", desc=True).limit(1).execute()
-    )
-    if as_req.data:
-        owner_profile_id = as_req.data[0].get("profile_id")
-        owner_res = (
-            supabase.table("profiles").select("owner_telegram_user_id")
-            .eq("id", owner_profile_id).limit(1).execute()
+    # 2b) She is the REQUESTER → the owner she was approved into is waiting.
+    #     Match on her Telegram ID against requester_telegram_user_id (reliable),
+    #     NOT on username (which was case-mismatched / blank and silently failed).
+    if sister_tg_id:
+        as_req = (
+            supabase.table("requests").select("*")
+            .eq("requester_telegram_user_id", sister_tg_id)
+            .eq("status", "approved")
+            .order("decided_at", desc=True).limit(1).execute()
         )
-        owner_wid = owner_res.data[0].get("owner_telegram_user_id") if owner_res.data else None
-        if owner_wid:
-            try:
-                await context.bot.send_message(
-                    chat_id=owner_wid,
-                    text=("Alhamdulillah — the wali contact for " + profile_id +
-                          " (who expressed interest in your profile) is now available. 🤲\n\n"
-                          "Here are their contact details:\n"
-                          "👤 Wali contact: " + wali_number + "\n\n"
-                          "May Allah make it easy for you both. 🤲"),
-                )
-                released_to.append(str(owner_wid))
-            except Exception as e:
-                logging.warning("Could not release wali to waiting owner: " + str(e))
+        if as_req.data:
+            owner_profile_id = as_req.data[0].get("profile_id")
+            owner_res = (
+                supabase.table("profiles").select("owner_telegram_user_id")
+                .eq("id", owner_profile_id).limit(1).execute()
+            )
+            owner_wid = owner_res.data[0].get("owner_telegram_user_id") if owner_res.data else None
+            if owner_wid:
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_wid,
+                        text=("Alhamdulillah — the wali contact for " + profile_id +
+                              " (who expressed interest in your profile) is now available. 🤲\n\n"
+                              "Here are their contact details:\n"
+                              "👤 Wali contact: " + wali_number + "\n\n"
+                              "May Allah make it easy for you both. 🤲"),
+                    )
+                    released_to.append(str(owner_wid))
+                except Exception as e:
+                    logging.warning("Could not release wali to waiting owner: " + str(e))
 
     if released_to:
         await update.message.reply_text(
