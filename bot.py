@@ -280,6 +280,94 @@ def photo_invite_markup() -> InlineKeyboardMarkup:
 
 # ── Profile text builder ───────────────────────────────────────────────────────
 
+def country_flag(country: str) -> str:
+    """Return the flag emoji for a country name, or '' if not recognised.
+    Handles the common name variants your dropdown may store (e.g. 'United
+    States of America' / 'USA' / 'United States'). Case-insensitive. If the
+    country isn't found, returns '' so the caller can fall back to the pin.
+
+    Flags are built from the 2-letter ISO code: each letter -> regional
+    indicator symbol. So we only need name -> ISO2 here."""
+    if not country:
+        return ""
+    key = country.strip().lower()
+
+    # Common aliases -> ISO2. Extend this map to match your dropdown values.
+    ALIASES = {
+        "usa": "US", "u.s.a.": "US", "u.s.": "US", "united states": "US",
+        "united states of america": "US", "america": "US",
+        "uk": "GB", "u.k.": "GB", "united kingdom": "GB",
+        "great britain": "GB", "britain": "GB", "england": "GB",
+        "scotland": "GB", "wales": "GB", "northern ireland": "GB",
+        "uae": "AE", "u.a.e.": "AE", "united arab emirates": "AE",
+        "south korea": "KR", "korea": "KR", "north korea": "KP",
+        "russia": "RU", "ivory coast": "CI", "cote d'ivoire": "CI",
+        "czech republic": "CZ", "czechia": "CZ",
+        "democratic republic of the congo": "CD", "dr congo": "CD",
+        "republic of the congo": "CG", "congo": "CG",
+        "trinidad": "TT", "trinidad and tobago": "TT",
+        "bosnia": "BA", "bosnia and herzegovina": "BA",
+        "macedonia": "MK", "north macedonia": "MK",
+        "palestine": "PS", "palestinian territories": "PS",
+        "brunei": "BN", "burma": "MM", "myanmar": "MM",
+        "cape verde": "CV", "east timor": "TL", "timor-leste": "TL",
+        "swaziland": "SZ", "eswatini": "SZ",
+        "tanzania": "TZ", "vietnam": "VN", "laos": "LA", "syria": "SY",
+        "iran": "IR", "moldova": "MD", "vatican": "VA",
+    }
+
+    # Full name -> ISO2 map (common countries; extend as needed to cover your
+    # dropdown exactly).
+    NAMES = {
+        "afghanistan": "AF", "albania": "AL", "algeria": "DZ", "andorra": "AD",
+        "angola": "AO", "argentina": "AR", "armenia": "AM", "australia": "AU",
+        "austria": "AT", "azerbaijan": "AZ", "bahamas": "BS", "bahrain": "BH",
+        "bangladesh": "BD", "barbados": "BB", "belarus": "BY", "belgium": "BE",
+        "belize": "BZ", "benin": "BJ", "bhutan": "BT", "bolivia": "BO",
+        "botswana": "BW", "brazil": "BR", "bulgaria": "BG", "burkina faso": "BF",
+        "burundi": "BI", "cambodia": "KH", "cameroon": "CM", "canada": "CA",
+        "chad": "TD", "chile": "CL", "china": "CN", "colombia": "CO",
+        "comoros": "KM", "costa rica": "CR", "croatia": "HR", "cuba": "CU",
+        "cyprus": "CY", "denmark": "DK", "djibouti": "DJ", "dominica": "DM",
+        "dominican republic": "DO", "ecuador": "EC", "egypt": "EG",
+        "el salvador": "SV", "eritrea": "ER", "estonia": "EE", "ethiopia": "ET",
+        "fiji": "FJ", "finland": "FI", "france": "FR", "gabon": "GA",
+        "gambia": "GM", "georgia": "GE", "germany": "DE", "ghana": "GH",
+        "greece": "GR", "grenada": "GD", "guatemala": "GT", "guinea": "GN",
+        "guyana": "GY", "haiti": "HT", "honduras": "HN", "hungary": "HU",
+        "iceland": "IS", "india": "IN", "indonesia": "ID", "iraq": "IQ",
+        "ireland": "IE", "israel": "IL", "italy": "IT", "jamaica": "JM",
+        "japan": "JP", "jordan": "JO", "kazakhstan": "KZ", "kenya": "KE",
+        "kuwait": "KW", "kyrgyzstan": "KG", "latvia": "LV", "lebanon": "LB",
+        "lesotho": "LS", "liberia": "LR", "libya": "LY", "liechtenstein": "LI",
+        "lithuania": "LT", "luxembourg": "LU", "madagascar": "MG",
+        "malawi": "MW", "malaysia": "MY", "maldives": "MV", "mali": "ML",
+        "malta": "MT", "mauritania": "MR", "mauritius": "MU", "mexico": "MX",
+        "monaco": "MC", "mongolia": "MN", "montenegro": "ME", "morocco": "MA",
+        "mozambique": "MZ", "namibia": "NA", "nepal": "NP", "netherlands": "NL",
+        "new zealand": "NZ", "nicaragua": "NI", "niger": "NE", "nigeria": "NG",
+        "norway": "NO", "oman": "OM", "pakistan": "PK", "panama": "PA",
+        "papua new guinea": "PG", "paraguay": "PY", "peru": "PE",
+        "philippines": "PH", "poland": "PL", "portugal": "PT", "qatar": "QA",
+        "romania": "RO", "rwanda": "RW", "saudi arabia": "SA", "senegal": "SN",
+        "serbia": "RS", "seychelles": "SC", "sierra leone": "SL",
+        "singapore": "SG", "slovakia": "SK", "slovenia": "SI", "somalia": "SO",
+        "south africa": "ZA", "south sudan": "SS", "spain": "ES",
+        "sri lanka": "LK", "sudan": "SD", "suriname": "SR", "sweden": "SE",
+        "switzerland": "CH", "taiwan": "TW", "tajikistan": "TJ",
+        "thailand": "TH", "togo": "TG", "tunisia": "TN", "turkey": "TR",
+        "turkmenistan": "TM", "uganda": "UG", "ukraine": "UA", "uruguay": "UY",
+        "uzbekistan": "UZ", "venezuela": "VE", "yemen": "YE", "zambia": "ZM",
+        "zimbabwe": "ZW",
+    }
+
+    iso = ALIASES.get(key) or NAMES.get(key)
+    if not iso or len(iso) != 2:
+        return ""
+    # Convert ISO2 to regional-indicator flag emoji.
+    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in iso.upper())
+
+
 def build_profile_text(p: dict) -> str:
     raw = p.get("formatted_text") or ""
     if raw:
@@ -296,7 +384,9 @@ def build_profile_text(p: dict) -> str:
 
     lines.append(f"{gender_emoji} {gender_label} — {p['id']}")
     if p.get('city') or p.get('country'):
-        lines.append(f"📍 {', '.join(filter(None, [p.get('city'), p.get('country')]))}")
+        loc = ', '.join(filter(None, [p.get('city'), p.get('country')]))
+        flag = country_flag(p.get('country') or "")
+        lines.append(f"{flag} {loc}" if flag else f"📍 {loc}")
 
     lines.append("")
 
