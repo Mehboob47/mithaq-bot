@@ -169,7 +169,7 @@ def calculate_age(dob_value) -> int:
 
 def profile_button_markup(profile_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📩 Express Interest", callback_data="interest:" + profile_id)]]
+        [[InlineKeyboardButton("📩 Express Interest (contacts shared if approved)", callback_data="interest:" + profile_id)]]
     )
 
 
@@ -1473,9 +1473,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     prefix, profile_id = query.data.split(":", 1)
-    # First tap ("interest:" / legacy "interest_confirm:") shows the consent gate;
-    # only the "interest_go:" tap (after they confirm) actually creates the request.
-    confirmed = (prefix == "interest_go")
 
     if not user.username:
         await query.answer(
@@ -1603,48 +1600,13 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    # ── Two-tap consent gate ──
-    # All eligibility checks have passed. Before creating the request, make sure
-    # they understand what happens if the other side approves: their contact goes
-    # out (brother), or their wali's contact goes out (sister). Only the second
-    # tap ("I understand, send interest" → interest_go:) proceeds.
-    if not confirmed:
-        r_gender = (requester_profile.get("gender") or "").lower()
-        r_is_sister = ("sister" in r_gender or "female" in r_gender)
-        r_no_wali = bool(requester_profile.get("no_wali")) or not (requester_profile.get("wali_contact") or "").strip()
-        if r_is_sister and r_no_wali:
-            warn = (
-                "If they approve your interest, Mithaq will contact you first. As "
-                "you've told us you don't have a wali, we'll agree with you how your "
-                "introduction is made before anything is shared.\n\n"
-                "Nothing happens without speaking to you. Please only proceed if "
-                "you're happy to be introduced."
-            )
-        elif r_is_sister:
-            warn = (
-                "If they approve your interest, your wali's contact will be shared "
-                "so you can be introduced through him.\n\n"
-                "Please only proceed if you're happy to be introduced."
-            )
-        else:
-            warn = (
-                "If they approve your interest, your contact details will be shared "
-                "with them so you can connect.\n\n"
-                "Please only proceed if you're happy with that."
-            )
-        await query.answer("Please open your chat with the bot to confirm.", show_alert=True)
-        try:
-            await context.bot.send_message(
-                chat_id=user.id,
-                text="⚠️ Before you express interest\n\n" + warn,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ I understand, send interest", callback_data="interest_go:" + profile_id)],
-                    [InlineKeyboardButton("↩️ Cancel", callback_data="interest_abort")],
-                ]),
-            )
-        except Exception as e:
-            logging.warning("Could not send interest consent gate: " + str(e))
-        return
+    # ── Consent now lives on the channel button itself ──
+    # The channel "Express Interest" button reads "(contacts shared if approved)",
+    # so tapping it is itself the consent — no separate confirmation step and no
+    # switching to the bot DM (that screen-switch was the friction we removed).
+    # Expressing interest shares nothing yet and is reversible via /withdraw, so a
+    # pre-send "are you sure" gate isn't needed here. The weightier, irreversible
+    # moment — approval, where contact actually goes out — keeps its confirmation.
 
     owner_username = (profile.get("owner_telegram_username") or "")
     owner_tg_id = profile.get("owner_telegram_user_id")
@@ -2005,20 +1967,6 @@ async def interest_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(
             "No problem — your interest was not sent, and your photo has not been shared. "
             "You can express interest anytime. 🤲"
-        )
-    except Exception:
-        pass
-
-
-async def interest_abort(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles 'Cancel' on the express-interest consent gate (no request created)."""
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-    try:
-        await query.edit_message_text(
-            "No problem — no interest was sent. You can express interest anytime. 🤲"
         )
     except Exception:
         pass
@@ -3422,8 +3370,6 @@ def main() -> None:
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest_confirm:"))
-    app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest_go:"))
-    app.add_handler(CallbackQueryHandler(interest_abort, pattern=r"^interest_abort$"))
     app.add_handler(CallbackQueryHandler(interest_cancel, pattern=r"^interest_cancel$"))
     app.add_handler(CallbackQueryHandler(handle_decline_reason, pattern=r"^dr:"))
     app.add_handler(CallbackQueryHandler(available_menu, pattern=r"^avail_menu$"))
