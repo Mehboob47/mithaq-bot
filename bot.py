@@ -445,6 +445,34 @@ def build_profile_text(p: dict) -> str:
     return "\n".join(lines)
 
 
+def build_interest_notification(profile_id: str, requester_profile: dict, photo_line: str = "") -> str:
+    """Owner notification including the requester's profile, guaranteed to fit within
+    Telegram's 4096-char limit. If the full profile would overflow, it is trimmed and
+    the owner is pointed to the full profile in the channel."""
+    header = (
+        "💚 Someone has expressed interest in you\n\n"
+        "A member has expressed interest in your profile " + str(profile_id) + ". "
+        "Their profile is below for you to consider.\n"
+        "───────────────\n"
+    )
+    footer = "───────────────" + str(photo_line) + "\n\nNothing is shared unless you approve. 🤲"
+
+    try:
+        rendered = build_profile_text(requester_profile) if requester_profile else ""
+    except Exception as e:
+        logging.warning("Could not render requester profile: " + str(e))
+        rendered = ""
+
+    LIMIT = 3900  # Telegram hard limit is 4096; leave headroom.
+    budget = LIMIT - len(header) - len(footer)
+    if rendered and len(rendered) > budget:
+        trimmed = rendered[:max(0, budget - 60)].rstrip()
+        rendered = trimmed + "\n… (full profile in the channel — profile " + str(profile_id) + ")"
+
+    body = (rendered + "\n") if rendered else ""
+    return header + body + footer
+
+
 # ── Direct Telegram HTTP (used by Flask thread) ────────────────────────────────
 
 def send_telegram_message(chat_id: str, text: str, reply_markup: dict = None) -> bool:
@@ -718,20 +746,7 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
     else:
         photo_line = "\n📷 Neither of you has added a photo. Photos are optional and only ever shared privately when both sides add one and both approve."
 
-    try:
-        _rp_rendered = build_profile_text(requester_profile) if requester_profile else ""
-    except Exception:
-        _rp_rendered = ""
-    request_text = (
-        "💚 Someone has expressed interest in you\n\n"
-        "A member has expressed interest in your profile " + profile_id + ". "
-        "Their profile is below for you to consider.\n"
-        "───────────────\n"
-        + (_rp_rendered + "\n" if _rp_rendered else "")
-        + "───────────────"
-        + photo_line + "\n\n"
-        "Nothing is shared unless you approve. 🤲"
-    )
+    request_text = build_interest_notification(profile_id, requester_profile, photo_line)
 
     admin_text = (
         "🔔 Queue Advanced — New Interest Request\n\n"
@@ -1808,22 +1823,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # ── Owner notification (best-effort) ──
         # Include the requester's FULL profile so the owner can consider them
         # properly, right here, without hunting for the profile in the channel.
-        try:
-            requester_rendered = build_profile_text(requester_profile) if requester_profile else ""
-        except Exception as e:
-            logging.warning("Could not render requester profile: " + str(e))
-            requester_rendered = ""
-
-        request_text = (
-            "💚 Someone has expressed interest in you\n\n"
-            "A member has expressed interest in your profile " + str(profile_id) + ". "
-            "Their profile is below for you to consider.\n"
-            "───────────────\n"
-            + (requester_rendered + "\n" if requester_rendered else "")
-            + "───────────────"
-            + str(photo_line) + "\n\n"
-            "Nothing is shared unless you approve. 🤲"
-        )
+        request_text = build_interest_notification(profile_id, requester_profile, str(photo_line))
 
         sent_to_owner = False
         if owner_tg_id:
@@ -2216,18 +2216,8 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         rq_prof = get_requester_profile(r.get("requester_username", ""), r.get("requester_telegram_user_id"))
         rq_photo = get_photo_ref(rq_prof)
         rq_pid = rq_prof["id"] if rq_prof else None
-        try:
-            rq_rendered = build_profile_text(rq_prof) if rq_prof else ""
-        except Exception:
-            rq_rendered = ""
         await query.edit_message_text(
-            "💚 Someone has expressed interest in you\n\n"
-            "A member has expressed interest in your profile " + str(pid) + ". "
-            "Their profile is below for you to consider.\n"
-            "───────────────\n"
-            + (rq_rendered + "\n" if rq_rendered else "")
-            + "───────────────\n\n"
-            "Nothing is shared unless you approve. 🤲",
+            build_interest_notification(pid, rq_prof, ""),
             reply_markup=owner_request_markup(int(request_id_str), bool(rq_photo), bool(o_photo)),
         )
         return
@@ -3147,20 +3137,7 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         photo_line = "\n📷 Neither of you has added a photo. Photos are optional and only ever shared privately when both sides add one and both approve."
 
-    try:
-        _rp_rendered2 = build_profile_text(requester_profile) if requester_profile else ""
-    except Exception:
-        _rp_rendered2 = ""
-    request_text = (
-        "💚 Someone has expressed interest in you\n\n"
-        "A member has expressed interest in your profile " + profile_id + ". "
-        "Their profile is below for you to consider.\n"
-        "───────────────\n"
-        + (_rp_rendered2 + "\n" if _rp_rendered2 else "")
-        + "───────────────"
-        + photo_line + "\n\n"
-        "Nothing is shared unless you approve. 🤲"
-    )
+    request_text = build_interest_notification(profile_id, requester_profile, photo_line)
 
     try:
         await context.bot.send_message(
