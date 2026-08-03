@@ -2111,6 +2111,89 @@ async def removephoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+async def reset_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: force-clear ALL pending requests and reset state for a user, to recover
+    a test account stuck with orphaned 'pending' requests from earlier testing.
+    Usage: /reset_user @username  or  /reset_user <telegram_user_id>
+    With no argument, resets the admin's own account."""
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    if user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    target_tg_id = None
+    target_username = None
+    if context.args:
+        arg = context.args[0].strip()
+        if arg.lstrip("-").isdigit():
+            target_tg_id = int(arg)
+        else:
+            target_username = arg.replace("@", "").strip().lower()
+    else:
+        target_tg_id = user.id
+
+    if target_tg_id is None and target_username:
+        try:
+            pr = (
+                supabase.table("profiles")
+                .select("owner_telegram_user_id")
+                .ilike("owner_telegram_username", target_username)
+                .limit(1)
+                .execute()
+            )
+            if pr.data and pr.data[0].get("owner_telegram_user_id"):
+                target_tg_id = pr.data[0]["owner_telegram_user_id"]
+        except Exception as e:
+            await update.message.reply_text("Lookup failed: " + str(e))
+            return
+
+    if target_tg_id is None:
+        await update.message.reply_text(
+            "Couldn't resolve that user. Try /reset_user <telegram_user_id>."
+        )
+        return
+
+    cleared_requests = 0
+    try:
+        pend = (
+            supabase.table("requests")
+            .select("id")
+            .eq("requester_telegram_user_id", target_tg_id)
+            .eq("status", "pending")
+            .execute()
+        )
+        for row in (pend.data or []):
+            supabase.table("requests").update({
+                "status": "withdrawn",
+                "decided_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", row["id"]).execute()
+            cleared_requests += 1
+
+        st = (
+            supabase.table("user_state")
+            .select("telegram_user_id")
+            .eq("telegram_user_id", target_tg_id)
+            .limit(1)
+            .execute()
+        )
+        if st.data:
+            supabase.table("user_state").update({
+                "active_request_id": None,
+                "state": "free",
+            }).eq("telegram_user_id", target_tg_id).execute()
+    except Exception as e:
+        await update.message.reply_text("Reset error: " + str(e))
+        return
+
+    await update.message.reply_text(
+        "✅ Reset done for user " + str(target_tg_id) + ".\n"
+        "Withdrew " + str(cleared_requests) + " pending request(s) and set state to free.\n"
+        "They can now express interest cleanly."
+    )
+
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or not update.message:
@@ -3480,6 +3563,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(addphoto_notnow, pattern=r"^addphoto_notnow$"))
     app.add_handler(CommandHandler("removephoto", removephoto_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CommandHandler("reset_user", reset_user_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest_confirm:"))
     app.add_handler(CallbackQueryHandler(interest_cancel, pattern=r"^interest_cancel$"))
