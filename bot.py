@@ -167,9 +167,20 @@ def calculate_age(dob_value) -> int:
 
 # ── Markup helpers ─────────────────────────────────────────────────────────────
 
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "Mithaq_Marriage_bot")
+
+
 def profile_button_markup(profile_id: str) -> InlineKeyboardMarkup:
+    # Deep-link button: tapping opens the user's private chat with the bot at
+    # /start interest_<profile_id>, where the gender-aware consent + a confirm
+    # button are shown before any interest is actually sent. This keeps the
+    # channel button clean while ensuring the person sees, in the bot chat,
+    # exactly what will be shared if their interest is approved.
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📩 Express Interest (contacts shared if approved)", callback_data="interest:" + profile_id)]]
+        [[InlineKeyboardButton(
+            "📩 Express Interest",
+            url="https://t.me/" + BOT_USERNAME + "?start=interest_" + profile_id,
+        )]]
     )
 
 
@@ -841,7 +852,8 @@ def post_new_profile():
 
     reply_markup = {
         "inline_keyboard": [[
-            {"text": "📩 Express Interest", "callback_data": "interest:" + profile_id}
+            {"text": "📩 Express Interest",
+             "url": "https://t.me/" + BOT_USERNAME + "?start=interest_" + profile_id}
         ]]
     }
 
@@ -943,6 +955,81 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         logging.info(f"Referral recorded: {user.id} via {affiliate_code}")
             except Exception as e:
                 logging.warning("Could not record referral: " + str(e))
+
+        elif arg.startswith("interest_"):
+            # ── Deep-link from the channel "Express Interest" button ──
+            # Show what will be shared if this interest is approved, then let them
+            # confirm. Nothing is sent until they tap the confirm button, which
+            # routes to interest_clicked (all eligibility checks live there).
+            target_profile_id = arg[len("interest_"):]
+
+            if not username:
+                await update.message.reply_text(
+                    "Assalamu alaikum!\n\n"
+                    "⚠️ To express interest you need a Telegram username set.\n\n"
+                    "📱 Go to: Settings → tap your name → Username → set one, "
+                    "then tap Express Interest again. 🤲"
+                )
+                return
+
+            # Requester's own profile → drives gender-aware wording.
+            requester = _get_user_profile_by_tg(user.id)
+            if not requester and username:
+                try:
+                    r = (
+                        supabase.table("profiles")
+                        .select("*")
+                        .ilike("owner_telegram_username", username)
+                        .limit(1)
+                        .execute()
+                    )
+                    if r.data:
+                        requester = r.data[0]
+                except Exception as e:
+                    logging.warning("interest deep-link: profile lookup failed: " + str(e))
+
+            if not requester:
+                await update.message.reply_text(
+                    "You need a Mithaq profile to express interest. "
+                    "Visit mithaqmarriage.com to submit yours. 🤲"
+                )
+                return
+
+            r_gender = (requester.get("gender") or "").lower()
+            r_is_sister = ("sister" in r_gender or "female" in r_gender)
+            r_no_wali = bool(requester.get("no_wali")) or not (requester.get("wali_contact") or "").strip()
+
+            if r_is_sister and r_no_wali:
+                warn = (
+                    "⚠️ Before you express interest\n\n"
+                    "If they approve, Mithaq will contact you first. As you've told us "
+                    "you don't have a wali, we'll agree with you how your introduction "
+                    "is made before anything is shared.\n\n"
+                    "Nothing happens without speaking to you."
+                )
+            elif r_is_sister:
+                warn = (
+                    "⚠️ Before you express interest\n\n"
+                    "If they approve, your wali's contact will be shared so you can be "
+                    "introduced through him.\n\n"
+                    "Please only proceed if you're happy to be introduced."
+                )
+            else:
+                warn = (
+                    "⚠️ Before you express interest\n\n"
+                    "If they approve, your contact details will be shared with them so "
+                    "you can connect.\n\n"
+                    "Please only proceed if you're happy with that."
+                )
+
+            await update.message.reply_text(
+                warn,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Send my interest", callback_data="interest:" + target_profile_id)],
+                    [InlineKeyboardButton("↩️ Cancel", callback_data="interest_cancel")],
+                ]),
+            )
+            return
 
     try:
         existing_state = (
@@ -1958,15 +2045,14 @@ async def addphoto_notnow(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def interest_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles 'Cancel' on the express-interest photo gate."""
+    """Handles 'Cancel' on the express-interest consent step (no request created)."""
     query = update.callback_query
     if not query:
         return
     await query.answer()
     try:
         await query.edit_message_text(
-            "No problem — your interest was not sent, and your photo has not been shared. "
-            "You can express interest anytime. 🤲"
+            "No problem — no interest was sent. You can express interest anytime. 🤲"
         )
     except Exception:
         pass
