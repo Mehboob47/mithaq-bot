@@ -252,21 +252,23 @@ def available_menu_markup() -> InlineKeyboardMarkup:
 
 def build_welcome_message(profile_id: str) -> str:
     return (
-        "Assalamu alaikum! 🌸\n\n"
-        "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live in the channel!\n\n"
+        "Assalamu alaikum, and welcome to Mithaq. 🤍\n\n"
+        "JazakAllahu khayran — your profile " + profile_id + " is now live in the channel.\n\n"
+        "Mithaq is not a swiping app. It is a serious, dignified path to marriage, built on the "
+        "belief that marriage is a mithaq — a solemn covenant. Here, your privacy is protected "
+        "and nothing about you is shared without your approval.\n\n"
         "Here's what happens next:\n\n"
-        "1️⃣ Channel members can tap 📩 Express Interest on your profile\n"
+        "1️⃣ Members can tap 📩 Express Interest on your profile\n"
         "2️⃣ You'll receive a message here with Approve and Decline buttons\n"
         "3️⃣ If you Approve, contact details are exchanged between both parties\n"
-        "4️⃣ If you Decline, they are notified and may look at other profiles\n\n"
+        "4️⃣ If you Decline, they are notified privately and may look at other profiles\n\n"
         "📌 You are in full control — nothing is shared without your approval\n"
-        "📌 Only wali contact is shared upon approval (for sisters)\n\n"
-        "🔔 Please make sure Telegram notifications are turned ON for this chat (tap the bot name above → Notifications) — this is how you'll hear about interest in your profile.\n\n"
-        "📢 Browse profiles and express interest here: " + CHANNEL_LINK + "\n\n"
+        "📌 For sisters, only the wali's contact is shared on approval\n\n"
+        "🔔 Please turn ON Telegram notifications for this chat (tap the bot name above → Notifications) — this is how you'll hear about interest in your profile.\n\n"
+        "📢 Browse profiles here: " + CHANNEL_LINK + "\n\n"
         "📌 You can pause your profile at any time using the button below.\n\n"
         "📌 If you ever stop receiving notifications, simply type /start again to reactivate your account.\n\n"
-        "Questions? Contact @MithaqAdmin 🤲\n\n"
-        "May Allah make it easy for you 🤲"
+        "Questions? Contact @MithaqAdmin. May Allah make it easy for you. 🤲"
     )
 
 
@@ -274,9 +276,10 @@ def build_welcome_message(profile_id: str) -> str:
 # so it stands out instead of being buried at the bottom of a long message.
 def build_photo_invite_message() -> str:
     return (
-        "📷 Would you like to add a private photo now?\n\n"
-        "_Private — only ever shared privately on mutual approval, never shown "
-        "publicly or in the channel._"
+        "📷 Would you like to add a private photo?\n\n"
+        "_Entirely your choice. A photo is only ever shared privately, and only when you "
+        "and one other person both approve and both choose to share — never public, never "
+        "in the channel._"
     )
 
 
@@ -715,11 +718,19 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
     else:
         photo_line = "\n📷 Neither of you has added a photo. Photos are optional and only ever shared privately when both sides add one and both approve."
 
+    try:
+        _rp_rendered = build_profile_text(requester_profile) if requester_profile else ""
+    except Exception:
+        _rp_rendered = ""
     request_text = (
-        "New Interest Request for your profile " + profile_id + "\n\n"
-        + requester_profile_text + " has expressed interest in your profile."
+        "💚 Someone has expressed interest in you\n\n"
+        "A member has expressed interest in your profile " + profile_id + ". "
+        "Their profile is below for you to consider.\n"
+        "───────────────\n"
+        + (_rp_rendered + "\n" if _rp_rendered else "")
+        + "───────────────"
         + photo_line + "\n\n"
-        "Please tap Approve or Decline below."
+        "Nothing is shared unless you approve. 🤲"
     )
 
     admin_text = (
@@ -1001,25 +1012,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             if r_is_sister and r_no_wali:
                 warn = (
-                    "⚠️ Before you express interest\n\n"
-                    "If they approve, Mithaq will contact you first. As you've told us "
-                    "you don't have a wali, we'll agree with you how your introduction "
-                    "is made before anything is shared.\n\n"
-                    "Nothing happens without speaking to you."
+                    "🤲 Before you express interest\n\n"
+                    "Marriage is a mithaq — a solemn covenant. Please proceed only with "
+                    "sincere intention.\n\n"
+                    "If they approve, Mithaq will speak with you first to arrange your "
+                    "introduction with care. Nothing is shared without you."
                 )
             elif r_is_sister:
                 warn = (
-                    "⚠️ Before you express interest\n\n"
+                    "🤲 Before you express interest\n\n"
+                    "Marriage is a mithaq — a solemn covenant. Please proceed only with "
+                    "sincere intention.\n\n"
                     "If they approve, your wali's contact will be shared so you can be "
-                    "introduced through him.\n\n"
-                    "Please only proceed if you're happy to be introduced."
+                    "introduced through him, in the proper manner."
                 )
             else:
                 warn = (
-                    "⚠️ Before you express interest\n\n"
-                    "If they approve, your contact details will be shared with them so "
-                    "you can connect.\n\n"
-                    "Please only proceed if you're happy with that."
+                    "🤲 Before you express interest\n\n"
+                    "Marriage is a mithaq — a solemn covenant. Please proceed only with "
+                    "sincere intention.\n\n"
+                    "If they approve, your contact details will be shared so you can connect."
                 )
 
             await update.message.reply_text(
@@ -1393,10 +1405,12 @@ async def my_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
     else:
         await update.message.reply_text(
-            "Your current interest request:\n\n"
+            "You're in the queue 🕰️\n\n"
             "Profile: " + profile_id + "\n"
-            "Status: 🔢 In queue (position " + str(queue_pos) + ")\n\n"
-            "You'll be notified when it's your turn insha'Allah.\n"
+            "Your position: " + str(queue_pos) + "\n\n"
+            "Someone else is currently being considered. Your place is private — held with "
+            "patience — and you'll be notified the moment it's your turn, insha'Allah. "
+            "One person at a time, always. 🤲\n"
             "To leave the queue, tap below or send /withdraw",
             reply_markup=queue_confirmation_markup(active_request_id),
         )
@@ -1697,7 +1711,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     owner_username = (profile.get("owner_telegram_username") or "")
     owner_tg_id = profile.get("owner_telegram_user_id")
-    owner_photo_url = profile.get("photo_url")
+    owner_photo_url = get_photo_ref(profile)
 
     active_check = (
         supabase.table("requests")
@@ -1760,10 +1774,10 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             }).execute()
 
         await query.answer(
-            ("✅ Interest sent! You'll be notified of their response insha'Allah."
-             + ("\n\n📷 Your photo is shared only if you both approve — never public."
+            ("✅ Your interest has been sent. You'll be notified of their response insha'Allah."
+             + ("\n\n📷 Your photo is only shared if you both approve — never public."
                 if requester_has_photo else "")
-             + "\n\n↩️ To cancel: tap Withdraw in the message the bot just sent you."),
+             + "\n\n↩️ To withdraw: tap Withdraw in the message the bot just sent you."),
             show_alert=True,
         )
 
@@ -1792,11 +1806,23 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             photo_line = "\n📷 Neither of you has added a photo. Photos are optional and only ever shared privately when both sides add one and both approve."
 
         # ── Owner notification (best-effort) ──
+        # Include the requester's FULL profile so the owner can consider them
+        # properly, right here, without hunting for the profile in the channel.
+        try:
+            requester_rendered = build_profile_text(requester_profile) if requester_profile else ""
+        except Exception as e:
+            logging.warning("Could not render requester profile: " + str(e))
+            requester_rendered = ""
+
         request_text = (
-            "New Interest Request for your profile " + str(profile_id) + "\n\n"
-            + str(requester_profile_text) + " has expressed interest in your profile."
+            "💚 Someone has expressed interest in you\n\n"
+            "A member has expressed interest in your profile " + str(profile_id) + ". "
+            "Their profile is below for you to consider.\n"
+            "───────────────\n"
+            + (requester_rendered + "\n" if requester_rendered else "")
+            + "───────────────"
             + str(photo_line) + "\n\n"
-            "Please tap Approve or Decline below."
+            "Nothing is shared unless you approve. 🤲"
         )
 
         sent_to_owner = False
@@ -1914,12 +1940,16 @@ async def handle_decline_reason(update: Update, context: ContextTypes.DEFAULT_TY
             "state": "awaiting_decline_reason",
             "active_request_id": request_id,
         }).eq("telegram_user_id", user.id).execute()
-        await query.edit_message_text("Please type your reason for declining and send it as a message 👇")
+        await query.edit_message_text(
+            "Please type your reason for declining below. 👇\n\n"
+            "⚠️ This will be sent privately to the person who expressed interest, "
+            "so please keep it kind and respectful. A gentle word is a sadaqah. 🤲"
+        )
         return
 
     reason_text = DECLINE_REASONS.get(reason_code, "Not the right fit")
     await complete_decline(request_id, user, context, reason_text)
-    await query.edit_message_text("❌ Decline sent. JazakAllahu khayran.")
+    await query.edit_message_text("Done — your reason has been sent privately to them. JazakAllahu khayran. 🤲")
 
 
 async def handle_free_text_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1948,7 +1978,7 @@ async def handle_free_text_reason(update: Update, context: ContextTypes.DEFAULT_
 
     reason_text = update.message.text.strip()
     await complete_decline(request_id, user, context, reason_text)
-    await update.message.reply_text("❌ Decline sent with your reason. JazakAllahu khayran.")
+    await update.message.reply_text("Done — your reason has been sent privately to them. JazakAllahu khayran. 🤲")
 
 
 # ── Photo feature ──────────────────────────────────────────────────────────────
@@ -2186,11 +2216,18 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         rq_prof = get_requester_profile(r.get("requester_username", ""), r.get("requester_telegram_user_id"))
         rq_photo = get_photo_ref(rq_prof)
         rq_pid = rq_prof["id"] if rq_prof else None
-        rq_text = "Profile " + rq_pid if rq_pid else "Anonymous"
+        try:
+            rq_rendered = build_profile_text(rq_prof) if rq_prof else ""
+        except Exception:
+            rq_rendered = ""
         await query.edit_message_text(
-            "New Interest Request for your profile " + str(pid) + "\n\n"
-            + str(rq_text) + " has expressed interest in your profile.\n\n"
-            "Please tap Approve or Decline below.",
+            "💚 Someone has expressed interest in you\n\n"
+            "A member has expressed interest in your profile " + str(pid) + ". "
+            "Their profile is below for you to consider.\n"
+            "───────────────\n"
+            + (rq_rendered + "\n" if rq_rendered else "")
+            + "───────────────\n\n"
+            "Nothing is shared unless you approve. 🤲",
             reply_markup=owner_request_markup(int(request_id_str), bool(rq_photo), bool(o_photo)),
         )
         return
@@ -2393,11 +2430,10 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Sister has no usable wali → don't send broken details. Tell the
             # requester it's being arranged, and alert admin to sort it out.
             hold_msg = (
-                "Alhamdulillah! Your interest in profile " + profile_id + " has been approved. 🤲\n\n"
-                "This sister does not currently have a wali on file, so Mithaq is helping "
-                "arrange the introduction. You'll be contacted with the wali details shortly "
-                "insha'Allah — no action needed from you right now.\n\n"
-                "May Allah make it easy for you both. 🤲"
+                "🤍 Alhamdulillah — your interest in profile " + profile_id + " has been approved.\n\n"
+                "This sister is being introduced through Mithaq. We'll be in touch with the "
+                "details shortly, insha'Allah — nothing is needed from you right now.\n\n"
+                "May Allah make it easy for you both, and put barakah in it. 🤲"
             )
             await context.bot.send_message(chat_id=requester_id, text=hold_msg)
             try:
@@ -2414,10 +2450,12 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 logging.warning("Could not send wali-needed admin alert: " + str(e))
         else:
             contact_msg = (
-                "Alhamdulillah! Your interest in profile " + profile_id + " has been approved. 🤲\n\n"
-                "Here are their contact details:\n"
+                "🤍 Alhamdulillah — your interest has been approved.\n\n"
+                "Below are their contact details. Please reach out with respect, patience, "
+                "and good character.\n\n"
                 + contact_lines + "\n\n"
-                "May Allah make it easy for you both. 🤲"
+                "From here, it is between you both, your walis, and Allah. May He put "
+                "barakah in it. 🤲"
                 "\n\n📌 When you're ready to return to searching, tap the button below or send /available."
             )
             await context.bot.send_message(
@@ -2544,7 +2582,10 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "active_request_id": request_id,
         }).eq("telegram_user_id", user.id).execute()
 
-        await query.edit_message_text("Please select a reason for declining 👇")
+        await query.edit_message_text(
+            "Please choose a reason for declining. 👇\n"
+            "(This is shared privately with the other person, so it's worded kindly.)"
+        )
         await context.bot.send_message(
             chat_id=user.id,
             text="Why are you declining this request?",
@@ -2827,11 +2868,11 @@ async def set_wali(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await context.bot.send_message(
                     chat_id=waiting_id,
-                    text=("Alhamdulillah — the wali contact for profile " + profile_id +
-                          " is now available. 🤲\n\n"
-                          "Here are their contact details:\n"
+                    text=("🤍 Alhamdulillah — the wali's contact for profile " + profile_id +
+                          " is ready. You can now be introduced through him. Please reach out "
+                          "with respect and good character.\n\n"
                           "👤 Wali contact: " + wali_number + "\n\n"
-                          "May Allah make it easy for you both. 🤲"),
+                          "May Allah put barakah in it. 🤲"),
                 )
                 released_to.append(str(waiting_id))
             except Exception as e:
@@ -2858,11 +2899,11 @@ async def set_wali(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 try:
                     await context.bot.send_message(
                         chat_id=owner_wid,
-                        text=("Alhamdulillah — the wali contact for " + profile_id +
-                              " (who expressed interest in your profile) is now available. 🤲\n\n"
-                              "Here are their contact details:\n"
+                        text=("🤍 Alhamdulillah — the wali's contact for " + profile_id +
+                              " (who expressed interest in your profile) is ready. You can now be "
+                              "introduced through him. Please reach out with respect and good character.\n\n"
                               "👤 Wali contact: " + wali_number + "\n\n"
-                              "May Allah make it easy for you both. 🤲"),
+                              "May Allah put barakah in it. 🤲"),
                     )
                     released_to.append(str(owner_wid))
                 except Exception as e:
@@ -3059,7 +3100,7 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     profile = profile_result.data[0]
     owner_tg_id = profile.get("owner_telegram_user_id")
-    owner_photo_url = profile.get("photo_url")
+    owner_photo_url = get_photo_ref(profile)
 
     if not owner_tg_id:
         await update.message.reply_text(
@@ -3106,11 +3147,19 @@ async def resend_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         photo_line = "\n📷 Neither of you has added a photo. Photos are optional and only ever shared privately when both sides add one and both approve."
 
+    try:
+        _rp_rendered2 = build_profile_text(requester_profile) if requester_profile else ""
+    except Exception:
+        _rp_rendered2 = ""
     request_text = (
-        "New Interest Request for your profile " + profile_id + "\n\n"
-        + requester_profile_text + " has expressed interest in your profile."
+        "💚 Someone has expressed interest in you\n\n"
+        "A member has expressed interest in your profile " + profile_id + ". "
+        "Their profile is below for you to consider.\n"
+        "───────────────\n"
+        + (_rp_rendered2 + "\n" if _rp_rendered2 else "")
+        + "───────────────"
         + photo_line + "\n\n"
-        "Please tap Approve or Decline below."
+        "Nothing is shared unless you approve. 🤲"
     )
 
     try:
