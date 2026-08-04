@@ -2127,7 +2127,31 @@ async def reset_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_username = None
     if context.args:
         arg = context.args[0].strip()
-        if arg.lstrip("-").isdigit():
+        # Accept a profile ID (e.g. MTHAQ-225), a @username, or a numeric telegram id.
+        if arg.upper().startswith("MTHAQ-") or arg.upper().startswith("MTHAQ"):
+            pid = arg.upper()
+            if pid.startswith("MTHAQ") and not pid.startswith("MTHAQ-"):
+                pid = "MTHAQ-" + pid[len("MTHAQ"):]
+            try:
+                pr = (
+                    supabase.table("profiles")
+                    .select("owner_telegram_user_id")
+                    .eq("id", pid)
+                    .limit(1)
+                    .execute()
+                )
+                if pr.data and pr.data[0].get("owner_telegram_user_id"):
+                    target_tg_id = pr.data[0]["owner_telegram_user_id"]
+                else:
+                    await update.message.reply_text(
+                        "Profile " + pid + " has no linked Telegram account (owner_telegram_user_id is empty), "
+                        "so there's no user state to reset."
+                    )
+                    return
+            except Exception as e:
+                await update.message.reply_text("Lookup failed: " + str(e))
+                return
+        elif arg.lstrip("-").isdigit():
             target_tg_id = int(arg)
         else:
             target_username = arg.replace("@", "").strip().lower()
@@ -2796,12 +2820,14 @@ async def available_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # 2) find the match partner via the most recent approved request (either direction)
     partner_profile_id = None
     partner_tg_id = None
+    closed_request_id = None
 
     res = (supabase.table("requests").select("*")
            .eq("profile_id", profile_id).eq("status", "approved")
            .order("decided_at", desc=True).limit(1).execute())
     if res.data:                                   # this user was the OWNER
         req = res.data[0]
+        closed_request_id = req.get("id")
         partner_tg_id = req.get("requester_telegram_user_id")
         partner_prof = get_requester_profile(req.get("requester_username", ""), req.get("requester_telegram_user_id"))
         partner_profile_id = partner_prof["id"] if partner_prof else None
@@ -2811,10 +2837,20 @@ async def available_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                .order("decided_at", desc=True).limit(1).execute())
         if res.data:
             req = res.data[0]
+            closed_request_id = req.get("id")
             partner_profile_id = req.get("profile_id")
             owner_res = (supabase.table("profiles").select("owner_telegram_user_id")
                          .eq("id", partner_profile_id).limit(1).execute())
             partner_tg_id = owner_res.data[0].get("owner_telegram_user_id") if owner_res.data else None
+
+    # Close the old approved request so it is never re-found as a "current" match.
+    # (Without this, the same approved request keeps being picked up, leaving both
+    # sides in a stale-matched state even after they've been made available again.)
+    if closed_request_id is not None:
+        supabase.table("requests").update({
+            "status": "closed",
+            "decided_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", closed_request_id).execute()
 
     # 3) reactivate the partner too, free their state, repost, notify gently
     if partner_profile_id:
