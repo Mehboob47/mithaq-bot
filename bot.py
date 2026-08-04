@@ -1775,7 +1775,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     active_check = (
         supabase.table("requests")
-        .select("id")
+        .select("id,requester_telegram_user_id")
         .eq("profile_id", profile_id)
         .eq("status", "pending")
         .eq("is_active_request", True)
@@ -1783,11 +1783,53 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         .execute()
     )
 
+    # Guard against a GHOST active request: a pending+active request whose requester
+    # is no longer actually waiting on it (their user_state doesn't point to it, or
+    # was reset). Such ghosts would otherwise queue everyone new behind them forever.
+    if active_check.data:
+        ghost_id = active_check.data[0]["id"]
+        ghost_requester = active_check.data[0].get("requester_telegram_user_id")
+        is_ghost = False
+        try:
+            if ghost_requester:
+                gs = (
+                    supabase.table("user_state")
+                    .select("active_request_id,state")
+                    .eq("telegram_user_id", ghost_requester)
+                    .limit(1)
+                    .execute()
+                )
+                if not gs.data:
+                    is_ghost = True
+                else:
+                    gs_active = gs.data[0].get("active_request_id")
+                    gs_state = gs.data[0].get("state")
+                    # Ghost if the requester's state no longer references this request
+                    # as their locked active request.
+                    if gs_active != ghost_id or gs_state not in ("locked", "queued"):
+                        is_ghost = True
+            else:
+                is_ghost = True
+        except Exception as e:
+            logging.warning("ghost-check lookup failed: " + str(e))
+
+        if is_ghost:
+            try:
+                supabase.table("requests").update(
+                    {"status": "closed", "is_active_request": False,
+                     "decided_at": datetime.now(timezone.utc).isoformat()}
+                ).eq("id", ghost_id).execute()
+                logging.info("Cleared ghost active request " + str(ghost_id) + " on " + profile_id)
+                active_check.data = []  # profile is now free
+            except Exception as e:
+                logging.warning("Could not clear ghost request: " + str(e))
+
     queue_count = (
         supabase.table("requests")
         .select("id", count="exact")
         .eq("profile_id", profile_id)
         .eq("status", "pending")
+        .eq("is_active_request", True)
         .execute()
     )
 
