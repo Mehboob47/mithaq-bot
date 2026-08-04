@@ -185,13 +185,16 @@ def profile_button_markup(profile_id: str) -> InlineKeyboardMarkup:
 
 
 def owner_request_markup(request_id: int, requester_has_photo: bool, owner_has_photo: bool, include_consider: bool = True) -> InlineKeyboardMarkup:
-    row1 = [
+    # Approve and Decline share the top row. When a photo option applies, it goes on
+    # its OWN full-width row so the longer "Approve & Share Photos" label isn't
+    # truncated by sharing a row with the other two buttons.
+    rows = [[
         InlineKeyboardButton("✅ Approve", callback_data="approve:" + str(request_id)),
-    ]
+        InlineKeyboardButton("❌ Decline", callback_data="decline:" + str(request_id)),
+    ]]
     if requester_has_photo and owner_has_photo:
-        row1.append(InlineKeyboardButton("📷 Approve & Share Photos", callback_data="approve_photo:" + str(request_id)))
-    row1.append(InlineKeyboardButton("❌ Decline", callback_data="decline:" + str(request_id)))
-    rows = [row1]
+        rows.append([InlineKeyboardButton(
+            "📷 Approve & also share photos", callback_data="approve_photo:" + str(request_id))])
     if include_consider:
         rows.append([InlineKeyboardButton("🤲 I need time to consider", callback_data="consider:" + str(request_id))])
     return InlineKeyboardMarkup(rows)
@@ -2657,7 +2660,11 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text="✅ Approved" + (" with photos" if share_photos else "") + ": profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username", requester_id)) + " by @" + str(user.username or user.id),
         )
 
-        await query.edit_message_text("✅ You approved request " + str(request_id) + " for profile " + profile_id + (" with photos shared." if share_photos else "."))
+        await query.edit_message_text(
+            "🤍 Alhamdulillah — you've approved this introduction"
+            + (", and your photos have been shared." if share_photos else ".")
+            + " Their contact details are on their way to you now. May Allah put barakah in it. 🤲"
+        )
 
         remaining = (
             supabase.table("requests")
@@ -2823,12 +2830,13 @@ async def available_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("No problem — nothing has changed. 🤲")
         return
 
-    # 1) reactivate this user's profile + free their state + repost
+    # 1) reactivate this user's profile + free their state
+    # (No channel repost: their original profile post remains in the channel, so
+    # they're still findable. Reposting on every unmatch just floods the channel.)
     supabase.table("profiles").update(
         {"is_active": True, "is_paused": False, "is_matched": False}).eq("id", profile_id).execute()
     supabase.table("user_state").update(
         {"state": "free", "active_request_id": None}).eq("telegram_user_id", user.id).execute()
-    await repost_profile(profile_id, context)
 
     # 2) find the match partner via the most recent approved request (either direction)
     partner_profile_id = None
@@ -2865,11 +2873,10 @@ async def available_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "decided_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", closed_request_id).execute()
 
-    # 3) reactivate the partner too, free their state, repost, notify gently
+    # 3) reactivate the partner too, free their state, notify gently (no repost)
     if partner_profile_id:
         supabase.table("profiles").update(
             {"is_active": True, "is_paused": False, "is_matched": False}).eq("id", partner_profile_id).execute()
-        await repost_profile(partner_profile_id, context)
         if partner_tg_id:
             supabase.table("user_state").update(
                 {"state": "free", "active_request_id": None}).eq("telegram_user_id", partner_tg_id).execute()
