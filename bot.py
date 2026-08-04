@@ -2552,8 +2552,12 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "and good character.\n\n"
                 + contact_lines + "\n\n"
                 "From here, it is between you both, your walis, and Allah. May He put "
-                "barakah in it. 🤲"
-                "\n\n📌 When you're ready to return to searching, tap the button below or send /available."
+                "barakah in it. 🤲\n\n"
+                "─────────────\n"
+                "⚠️ Important: while you're in this introduction, your profile is paused and "
+                "you won't see or receive new interest. If it doesn't progress to marriage, "
+                "please come back and tap the 'Make me available again' button below (or send /available) "
+                "so you return to the pool. Otherwise you'll stay paused."
             )
             await context.bot.send_message(
                 chat_id=requester_id, text=contact_msg, reply_markup=available_menu_markup())
@@ -2595,11 +2599,16 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     logging.warning("Could not send wali-needed admin alert (owner side): " + str(e))
             else:
                 owner_contact_msg = (
-                    "✅ You approved the interest from " + req_profile_id + ". Contact details have been exchanged.\n\n"
+                    "🤍 Alhamdulillah — you approved the interest from " + req_profile_id + ". "
+                    "Contact details have been exchanged.\n\n"
                     "Here are their contact details:\n"
                     + req_lines + "\n\n"
-                    "May Allah make it easy for you both. 🤲"
-                    "\n\n📌 When you're ready to return to searching, tap the button below or send /available."
+                    "May Allah put barakah in it. 🤲\n\n"
+                    "─────────────\n"
+                    "⚠️ Important: while you're in this introduction, your profile is paused and "
+                    "you won't see or receive new interest. If it doesn't progress to marriage, "
+                    "please come back and tap the 'Make me available again' button below (or send /available) "
+                    "so you return to the pool. Otherwise you'll stay paused."
                 )
                 try:
                     await context.bot.send_message(
@@ -2610,9 +2619,13 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             try:
                 await context.bot.send_message(
                     chat_id=owner_tg_id,
-                    text=("✅ You approved the interest request. Your contact details have been shared with them. "
-                          "May Allah make it easy for you both. 🤲\n\n"
-                          "📌 When you're ready to return to searching, tap the button below or send /available."),
+                    text=("🤍 Alhamdulillah — you approved the interest request. Your contact details "
+                          "have been shared with them. May Allah put barakah in it. 🤲\n\n"
+                          "─────────────\n"
+                          "⚠️ Important: while you're in this introduction, your profile is paused and "
+                          "you won't see or receive new interest. If it doesn't progress to marriage, "
+                          "please come back and tap the 'Make me available again' button below (or send /available) "
+                          "so you return to the pool. Otherwise you'll stay paused."),
                     reply_markup=available_menu_markup(),
                 )
             except Exception as e:
