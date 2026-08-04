@@ -1681,13 +1681,55 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
     user_state = state_result.data[0].get("state") if state_result.data else "free"
+    active_request_id = state_result.data[0].get("active_request_id") if state_result.data else None
 
     if user_state == "locked":
-        await query.answer(
-            "You already have an active pending request. Send /my_request to see it or /withdraw to cancel it.",
-            show_alert=True,
-        )
-        return
+        # Only block if there is ACTUALLY a live pending request. State can get
+        # orphaned at "locked" (e.g. a flow was interrupted and never reset), which
+        # would otherwise wrongly block the user forever. If no genuine pending
+        # request exists, self-heal the state to free and let them proceed.
+        real_pending = None
+        try:
+            if active_request_id:
+                rp = (
+                    supabase.table("requests")
+                    .select("id,status")
+                    .eq("id", active_request_id)
+                    .limit(1)
+                    .execute()
+                )
+                if rp.data and rp.data[0].get("status") == "pending":
+                    real_pending = rp.data[0]
+            if real_pending is None:
+                # Fallback: any pending request they own as requester?
+                rp2 = (
+                    supabase.table("requests")
+                    .select("id")
+                    .eq("requester_telegram_user_id", user.id)
+                    .eq("status", "pending")
+                    .limit(1)
+                    .execute()
+                )
+                if rp2.data:
+                    real_pending = rp2.data[0]
+        except Exception as e:
+            logging.warning("pending-check lookup failed: " + str(e))
+
+        if real_pending is not None:
+            await query.answer(
+                "You already have an active pending request. Send /my_request to see it or /withdraw to cancel it.",
+                show_alert=True,
+            )
+            return
+        else:
+            # Orphaned "locked" state with no real pending request — heal it.
+            try:
+                supabase.table("user_state").update(
+                    {"state": "free", "active_request_id": None}
+                ).eq("telegram_user_id", user.id).execute()
+                logging.info("Healed orphaned 'locked' state for user " + str(user.id))
+            except Exception as e:
+                logging.warning("Could not heal orphaned state: " + str(e))
 
     profile_result = (
         supabase.table("profiles")
