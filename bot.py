@@ -1885,13 +1885,19 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "state": "locked",
             }).execute()
 
-        await query.answer(
-            ("✅ Your interest has been sent. You'll be notified of their response insha'Allah."
-             + ("\n\n📷 Your photo is only shared if you both approve — never public."
-                if requester_has_photo else "")
-             + "\n\n↩️ To withdraw: tap Withdraw in the message the bot just sent you."),
-            show_alert=True,
-        )
+        # Best-effort popup. In the deep-link flow the callback query can expire
+        # before we get here, making answer() fail with 400 — that must NOT crash
+        # the flow, because the confirmation is also sent as a normal message below.
+        try:
+            await query.answer(
+                ("✅ Your interest has been sent. You'll be notified of their response insha'Allah."
+                 + ("\n\n📷 Your photo is only shared if you both approve — never public."
+                    if requester_has_photo else "")
+                 + "\n\n↩️ To withdraw: tap Withdraw in the message the bot just sent you."),
+                show_alert=True,
+            )
+        except Exception as e:
+            logging.info("interest-sent popup skipped (callback likely expired): " + str(e))
 
         await context.bot.send_message(
             chat_id=user.id,
