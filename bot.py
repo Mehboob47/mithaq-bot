@@ -1356,6 +1356,16 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "decided_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", active_request_id).execute()
 
+    # Also clear ANY other stray pending requests this user owns, so orphaned
+    # requests can't linger and keep falsely blocking them from expressing interest.
+    try:
+        supabase.table("requests").update({
+            "status": "withdrawn",
+            "decided_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("requester_telegram_user_id", user.id).eq("status", "pending").execute()
+    except Exception as e:
+        logging.warning("Could not clear stray pending requests on withdraw: " + str(e))
+
     supabase.table("user_state").update({
         "active_request_id": None,
         "state": "free",
@@ -2195,6 +2205,69 @@ async def removephoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     # as-is; if you want to clear that too, it can be added here.
     await update.message.reply_text(
         "✅ Your Telegram photo has been removed. You can add one again anytime with /addphoto. 🤲"
+    )
+
+
+async def reset_all_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: clear ALL pending/queued requests across the whole system and free
+    every user's state. Use this to get a clean slate after heavy testing has left
+    a tangle of interconnected requests between many test profiles.
+    Usage: /reset_all_requests CONFIRM"""
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    if user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    if not context.args or context.args[0].strip().upper() != "CONFIRM":
+        await update.message.reply_text(
+            "⚠️ This clears ALL pending/queued interest requests across the entire system "
+            "and frees every user's state. Approved matches that are already completed are "
+            "not affected.\n\n"
+            "To proceed, send: /reset_all_requests CONFIRM"
+        )
+        return
+
+    cleared = 0
+    freed = 0
+    try:
+        pend = (
+            supabase.table("requests")
+            .select("id")
+            .eq("status", "pending")
+            .execute()
+        )
+        for row in (pend.data or []):
+            supabase.table("requests").update({
+                "status": "withdrawn",
+                "is_active_request": False,
+                "decided_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", row["id"]).execute()
+            cleared += 1
+
+        # Free any user_state that is locked/queued.
+        states = (
+            supabase.table("user_state")
+            .select("telegram_user_id,state")
+            .in_("state", ["locked", "queued"])
+            .execute()
+        )
+        for row in (states.data or []):
+            supabase.table("user_state").update({
+                "state": "free",
+                "active_request_id": None,
+            }).eq("telegram_user_id", row["telegram_user_id"]).execute()
+            freed += 1
+    except Exception as e:
+        await update.message.reply_text("Error during global reset: " + str(e))
+        return
+
+    await update.message.reply_text(
+        "✅ Global reset complete.\n"
+        "Cleared " + str(cleared) + " pending/queued request(s) and freed "
+        + str(freed) + " user state(s).\n"
+        "The whole system is now a clean slate for testing."
     )
 
 
@@ -3704,6 +3777,7 @@ def main() -> None:
     app.add_handler(CommandHandler("removephoto", removephoto_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CommandHandler("reset_user", reset_user_command))
+    app.add_handler(CommandHandler("reset_all_requests", reset_all_requests_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest_confirm:"))
     app.add_handler(CallbackQueryHandler(interest_cancel, pattern=r"^interest_cancel$"))
