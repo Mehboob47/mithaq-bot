@@ -38,6 +38,14 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "mithaq-secret-2026")
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 CHANNEL_LINK = "https://t.me/+ilWsgu9hLb02ODQ0"
 
+# ── Repost marker ──────────────────────────────────────────────────────────────
+# During the back-catalogue cleanup, every REPOSTED profile carries this header
+# so members can instantly tell reposts apart from brand-new profiles. Anything
+# WITHOUT the header is a new member by definition. Set MARK_REPOSTS = False
+# once the cleanup drip is finished to stop marking reposts.
+MARK_REPOSTS = True
+REPOST_HEADER = "♻️ Repost — earlier profile, shared again for newer members\n\n"
+
 DECLINE_REASONS = {
     "not_right_fit": "Not the right fit at this time",
     "location": "Location not compatible",
@@ -448,6 +456,14 @@ def build_profile_text(p: dict) -> str:
     return "\n".join(lines)
 
 
+def repost_text(p: dict) -> str:
+    """Profile text for a REPOST (not a brand-new profile). Prepends the repost
+    header so members can tell reposts apart from new profiles at a glance.
+    Toggle MARK_REPOSTS = False to stop marking once the cleanup is done."""
+    header = REPOST_HEADER if MARK_REPOSTS else ""
+    return header + build_profile_text(p)
+
+
 def build_interest_notification(profile_id: str, requester_profile: dict, photo_line: str = "") -> str:
     """Owner notification including the requester's profile, guaranteed to fit within
     Telegram's 4096-char limit. If the full profile would overflow, it is trimmed and
@@ -656,7 +672,7 @@ async def repost_profile(profile_id: str, context) -> None:
             return
 
         p = profile_result.data[0]
-        text = build_profile_text(p)
+        text = repost_text(p)
 
         await context.bot.send_message(
             chat_id=CHANNEL_ID,
@@ -874,10 +890,12 @@ def post_new_profile():
     if linked_id and not p.get("owner_telegram_user_id"):
         p["owner_telegram_user_id"] = linked_id
 
-    text = build_profile_text(p)
     is_new = not p.get("notified")
     if is_new:
-        text = "🆕 NEW PROFILE\n\n" + text
+        text = "🆕 NEW PROFILE\n\n" + build_profile_text(p)
+    else:
+        # A webhook call for an already-notified profile is a repost — mark it.
+        text = repost_text(p)
 
     reply_markup = {
         "inline_keyboard": [[
@@ -1471,9 +1489,12 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     p = result.data[0]
     is_new = not p.get("notified")
-    text = build_profile_text(p)
     if is_new:
-        text = "🆕 NEW PROFILE\n\n" + text
+        text = "🆕 NEW PROFILE\n\n" + build_profile_text(p)
+    else:
+        # Re-posting an already-live profile = a repost — mark it so members can
+        # tell it apart from brand-new profiles.
+        text = repost_text(p)
 
     await context.bot.send_message(
         chat_id=CHANNEL_ID,
@@ -1539,7 +1560,8 @@ async def bump_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     p = result.data[0]
-    text = build_profile_text(p)
+    # A bump re-sends an existing profile to the channel = a repost — mark it.
+    text = repost_text(p)
 
     await context.bot.send_message(
         chat_id=CHANNEL_ID,
@@ -1576,7 +1598,7 @@ async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for p in result.data:
         profile_id = p["id"]
         try:
-            text = build_profile_text(p)
+            text = repost_text(p)
             await context.bot.send_message(
                 chat_id=CHANNEL_ID,
                 text=text,
