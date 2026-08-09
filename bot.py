@@ -433,6 +433,8 @@ def build_profile_text(p: dict) -> str:
     # ── Religious details second ──
     if p.get('deen'):             lines.append(f"🕌 Religious practice: {p['deen']}")
     if p.get('prayer'):           lines.append(f"🙏 Five daily prayers: {p['prayer']}")
+    if p.get('hijab'):            lines.append(f"🧕 Hijab: {p['hijab']}")
+    if p.get('beard'):            lines.append(f"🧔 Beard: {p['beard']}")
     if p.get('madhab'):           lines.append(f"📚 Madhab: {p['madhab']}")
     if p.get('revert'):           lines.append(f"🕋 Faith background: {p['revert']}")
 
@@ -2511,6 +2513,104 @@ async def rehome_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def edit_about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: replace a profile's About text.
+    Usage: /edit_about MTHAQ-123 <new about text — can be multiple lines>"""
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    if user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    # Take everything after the command as raw text so newlines survive.
+    raw = (update.message.text or "")
+    parts = raw.split(None, 2)  # ["/edit_about", "MTHAQ-123", "<text...>"]
+    if len(parts) < 3:
+        await update.message.reply_text(
+            "Usage: /edit_about MTHAQ-001 <new about text>"
+        )
+        return
+
+    profile_id = parts[1].strip().upper()
+    new_about = parts[2].strip()
+
+    pr = supabase.table("profiles").select("id").eq("id", profile_id).limit(1).execute()
+    if not pr.data:
+        await update.message.reply_text("Profile " + profile_id + " not found.")
+        return
+
+    # Clear formatted_text so the channel post is rebuilt from fields and the
+    # new About actually shows (a stale formatted_text would otherwise win).
+    supabase.table("profiles").update({
+        "about": new_about,
+        "formatted_text": None,
+    }).eq("id", profile_id).execute()
+
+    await update.message.reply_text(
+        "✅ About updated for " + profile_id + " (" + str(len(new_about)) + " chars).\n"
+        "Run /bump " + profile_id + " to refresh the channel post "
+        "(delete the old post first)."
+    )
+
+
+async def set_field_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: set a single field on a profile.
+    Usage: /set_field MTHAQ-123 city Manchester
+    Allowed fields are whitelisted to prevent typos corrupting key columns."""
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    if user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    ALLOWED = {
+        "city", "country", "height", "occupation", "education", "languages",
+        "nationality", "ethnicity", "marital_status", "children",
+        "willing_to_relocate", "deen", "prayer", "hijab", "beard", "madhab", "revert",
+        "pref_age_range", "spouse_deen_level", "marriage_dynamic",
+        "looking_for", "additional", "phone", "email", "wali_contact",
+        "female_family_contact", "dob",
+    }
+
+    raw = (update.message.text or "")
+    parts = raw.split(None, 3)  # ["/set_field", "MTHAQ-123", "field", "<value...>"]
+    if len(parts) < 4:
+        await update.message.reply_text(
+            "Usage: /set_field MTHAQ-001 field value\n"
+            "Fields: " + ", ".join(sorted(ALLOWED))
+        )
+        return
+
+    profile_id = parts[1].strip().upper()
+    field = parts[2].strip().lower()
+    value = parts[3].strip()
+
+    if field not in ALLOWED:
+        await update.message.reply_text(
+            "Field '" + field + "' not allowed.\nFields: " + ", ".join(sorted(ALLOWED))
+        )
+        return
+
+    pr = supabase.table("profiles").select("id").eq("id", profile_id).limit(1).execute()
+    if not pr.data:
+        await update.message.reply_text("Profile " + profile_id + " not found.")
+        return
+
+    # Clear formatted_text so field edits actually show on the next post.
+    supabase.table("profiles").update({
+        field: value,
+        "formatted_text": None,
+    }).eq("id", profile_id).execute()
+
+    await update.message.reply_text(
+        "✅ " + field + " updated for " + profile_id + ".\n"
+        "Run /bump " + profile_id + " to refresh the channel post "
+        "(delete the old post first)."
+    )
+
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or not update.message:
@@ -3912,6 +4012,8 @@ def main() -> None:
     app.add_handler(CommandHandler("reset_user", reset_user_command))
     app.add_handler(CommandHandler("reset_all_requests", reset_all_requests_command))
     app.add_handler(CommandHandler("rehome", rehome_command))
+    app.add_handler(CommandHandler("edit_about", edit_about_command))
+    app.add_handler(CommandHandler("set_field", set_field_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest_confirm:"))
     app.add_handler(CallbackQueryHandler(interest_cancel, pattern=r"^interest_cancel$"))
