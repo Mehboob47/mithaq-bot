@@ -2555,6 +2555,56 @@ async def view_photo_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
+async def view_all_photos_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: view every photo on file, one message per profile (moderation sweep).
+    Usage: /view_all_photos            — all profiles with a photo
+           /view_all_photos active     — only active, unpaused profiles"""
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    if user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+
+    only_active = bool(context.args) and context.args[0].strip().lower() == "active"
+
+    q = supabase.table("profiles").select("id, photo_file_id, photo_url, gender, is_active, is_paused")
+    if only_active:
+        q = q.eq("is_active", True).eq("is_paused", False)
+    result = q.order("id", desc=False).execute()
+
+    with_photo = [p for p in (result.data or []) if get_photo_ref(p)]
+    if not with_photo:
+        await update.message.reply_text("No profiles with photos found.")
+        return
+
+    await update.message.reply_text(
+        "🔒 Moderation sweep: sending " + str(len(with_photo)) + " photo(s)..."
+    )
+
+    sent, failed = 0, []
+    for p in with_photo:
+        try:
+            await context.bot.send_photo(
+                chat_id=user.id,
+                photo=get_photo_ref(p),
+                caption="🔒 " + p["id"] + " (" + (p.get("gender") or "?") + ")"
+                        + ("" if p.get("is_active") else " — INACTIVE")
+                        + (" — PAUSED" if p.get("is_paused") else ""),
+            )
+            sent += 1
+            await asyncio.sleep(1)  # respect Telegram rate limits
+        except Exception as e:
+            failed.append(p["id"])
+            logging.warning("view_all_photos failed for " + p["id"] + ": " + str(e))
+            await asyncio.sleep(1)
+
+    summary = "✅ Sweep complete: " + str(sent) + " photo(s) sent."
+    if failed:
+        summary += "\n❌ Failed (dead link or fetch error): " + ", ".join(failed)
+    await update.message.reply_text(summary)
+
+
 async def edit_about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin: replace a profile's About text.
     Usage: /edit_about MTHAQ-123 <new about text — can be multiple lines>"""
@@ -4055,6 +4105,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reset_all_requests", reset_all_requests_command))
     app.add_handler(CommandHandler("rehome", rehome_command))
     app.add_handler(CommandHandler("view_photo", view_photo_command))
+    app.add_handler(CommandHandler("view_all_photos", view_all_photos_command))
     app.add_handler(CommandHandler("edit_about", edit_about_command))
     app.add_handler(CommandHandler("set_field", set_field_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
