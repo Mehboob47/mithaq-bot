@@ -464,6 +464,17 @@ def repost_text(p: dict) -> str:
     return header + build_profile_text(p)
 
 
+def channel_safe_text(text: str) -> str:
+    """Guarantee a channel post fits Telegram's 4096-char message limit.
+    Over-length profiles (e.g. a very long About) previously made the send
+    throw, silently vanishing the profile from the channel. Truncates with a
+    marker instead so the post always goes out."""
+    LIMIT = 4000  # hard limit is 4096; leave headroom
+    if len(text) <= LIMIT:
+        return text
+    return text[:LIMIT - 30].rstrip() + "\n… (profile shortened to fit)"
+
+
 def build_interest_notification(profile_id: str, requester_profile: dict, photo_line: str = "") -> str:
     """Owner notification including the requester's profile, guaranteed to fit within
     Telegram's 4096-char limit. If the full profile would overflow, it is trimmed and
@@ -508,6 +519,20 @@ def send_telegram_message(chat_id: str, text: str, reply_markup: dict = None) ->
         result = resp.json()
         if not result.get("ok"):
             logging.error(f"Telegram API error: {result}")
+            # Markdown parse errors: retry once as plain text so a stray _ or *
+            # in someone's profile can never silently kill a message.
+            desc = str(result.get("description", "")).lower()
+            if "parse" in desc or "entit" in desc:
+                payload.pop("parse_mode", None)
+                try:
+                    resp2 = requests.post(url, json=payload, timeout=15)
+                    result2 = resp2.json()
+                    if result2.get("ok"):
+                        logging.info("Plain-text retry succeeded after parse error.")
+                        return True
+                    logging.error(f"Telegram API error (plain retry): {result2}")
+                except Exception as e2:
+                    logging.error(f"Plain-text retry failed: {e2}")
             return False
         return True
     except Exception as e:
@@ -676,7 +701,7 @@ async def repost_profile(profile_id: str, context) -> None:
 
         await context.bot.send_message(
             chat_id=CHANNEL_ID,
-            text=text,
+            text=channel_safe_text(text),
             reply_markup=profile_button_markup(profile_id),
         )
         logging.info(f"✅ Reposted {profile_id} to channel")
@@ -884,6 +909,21 @@ def post_new_profile():
 
     p = result.data[0]
 
+    # ── Normalise the username if the member typed it with a leading @ ──
+    # (e.g. "@Asaakius" stored verbatim breaks username-based lookups and would
+    # render as @@name in contact shares.) Fix it at source, once.
+    _uname_raw = (p.get("owner_telegram_username") or "").strip()
+    if _uname_raw.startswith("@"):
+        _uname_clean = _uname_raw.lstrip("@").lower()
+        try:
+            supabase.table("profiles").update(
+                {"owner_telegram_username": _uname_clean}
+            ).eq("id", profile_id).execute()
+            p["owner_telegram_username"] = _uname_clean
+            logging.info(f"Normalised username on {profile_id}: '{_uname_raw}' -> '{_uname_clean}'")
+        except Exception as e:
+            logging.warning("Could not normalise username: " + str(e))
+
     # ── Link this profile to the Telegram user who was issued its code ──
     # (registration code carried from the form → find the telegram id we gave it to)
     linked_id = link_profile_by_code(p)
@@ -904,7 +944,7 @@ def post_new_profile():
         ]]
     }
 
-    success = send_telegram_message(CHANNEL_ID, text, reply_markup)
+    success = send_telegram_message(CHANNEL_ID, channel_safe_text(text), reply_markup)
 
     if not success:
         return jsonify({"error": "Failed to send to Telegram"}), 500
@@ -1496,11 +1536,17 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # tell it apart from brand-new profiles.
         text = repost_text(p)
 
-    await context.bot.send_message(
-        chat_id=CHANNEL_ID,
-        text=text,
-        reply_markup=profile_button_markup(profile_id),
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=channel_safe_text(text),
+            reply_markup=profile_button_markup(profile_id),
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "❌ Could not post " + profile_id + " to channel: " + str(e)
+        )
+        return
     await update.message.reply_text("Profile " + profile_id + " posted to channel.")
 
     if is_new:
@@ -1563,11 +1609,17 @@ async def bump_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # A bump re-sends an existing profile to the channel = a repost — mark it.
     text = repost_text(p)
 
-    await context.bot.send_message(
-        chat_id=CHANNEL_ID,
-        text=text,
-        reply_markup=profile_button_markup(profile_id),
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=channel_safe_text(text),
+            reply_markup=profile_button_markup(profile_id),
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "❌ Could not bump " + profile_id + " to channel: " + str(e)
+        )
+        return
     await update.message.reply_text("✅ Profile " + profile_id + " bumped to channel.")
 
 
@@ -1601,7 +1653,7 @@ async def repost_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             text = repost_text(p)
             await context.bot.send_message(
                 chat_id=CHANNEL_ID,
-                text=text,
+                text=channel_safe_text(text),
                 reply_markup=profile_button_markup(profile_id),
             )
             success_count += 1
