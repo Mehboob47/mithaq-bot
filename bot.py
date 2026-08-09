@@ -2406,6 +2406,59 @@ async def reset_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def rehome_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: retire a profile and unlink its owner so they can register fresh
+    with a new code and a new form submission (e.g. someone replacing their old
+    profile with an updated one, keeping the same Telegram account).
+    Usage: /rehome MTHAQ-123"""
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    if user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /rehome MTHAQ-001")
+        return
+
+    profile_id = context.args[0].strip().upper()
+    pr = (
+        supabase.table("profiles")
+        .select("owner_telegram_user_id")
+        .eq("id", profile_id)
+        .limit(1)
+        .execute()
+    )
+    if not pr.data:
+        await update.message.reply_text("Profile " + profile_id + " not found.")
+        return
+
+    tg_id = pr.data[0].get("owner_telegram_user_id")
+
+    # Retire the old profile and unlink BOTH identity fields — clearing only the
+    # ID would let the username fallback silently re-link them to the old row.
+    supabase.table("profiles").update({
+        "is_active": False,
+        "is_paused": True,
+        "owner_telegram_user_id": None,
+        "owner_telegram_username": None,
+    }).eq("id", profile_id).execute()
+
+    # Wipe their old issued code so /start issues a fresh one instead of
+    # re-showing a code the form will reject as already used.
+    if tg_id:
+        supabase.table("user_state").update(
+            {"issued_code": None}
+        ).eq("telegram_user_id", tg_id).execute()
+
+    await update.message.reply_text(
+        "✅ " + profile_id + " retired and unlinked.\n"
+        "Tell them to send /start to the bot for a fresh registration code, "
+        "then submit the new form with it.\n"
+        "📌 Remember to delete the old post from the channel."
+    )
+
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or not update.message:
@@ -3806,6 +3859,7 @@ def main() -> None:
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CommandHandler("reset_user", reset_user_command))
     app.add_handler(CommandHandler("reset_all_requests", reset_all_requests_command))
+    app.add_handler(CommandHandler("rehome", rehome_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest_confirm:"))
     app.add_handler(CallbackQueryHandler(interest_cancel, pattern=r"^interest_cancel$"))
