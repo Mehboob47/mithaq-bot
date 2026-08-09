@@ -2513,6 +2513,48 @@ async def rehome_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def view_photo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: view the private photo on a profile (moderation only).
+    Usage: /view_photo MTHAQ-123"""
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    if user.id != ADMIN_TELEGRAM_USER_ID:
+        await update.message.reply_text("Not authorised.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /view_photo MTHAQ-001")
+        return
+
+    profile_id = context.args[0].strip().upper()
+    pr = (
+        supabase.table("profiles")
+        .select("id, photo_file_id, photo_url")
+        .eq("id", profile_id)
+        .limit(1)
+        .execute()
+    )
+    if not pr.data:
+        await update.message.reply_text("Profile " + profile_id + " not found.")
+        return
+
+    photo = get_photo_ref(pr.data[0])
+    if not photo:
+        await update.message.reply_text("Profile " + profile_id + " has no photo on file.")
+        return
+
+    try:
+        await context.bot.send_photo(
+            chat_id=user.id,
+            photo=photo,
+            caption="🔒 Private photo on " + profile_id + " (moderation view)",
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "❌ Could not retrieve photo for " + profile_id + ": " + str(e)
+        )
+
+
 async def edit_about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin: replace a profile's About text.
     Usage: /edit_about MTHAQ-123 <new about text — can be multiple lines>"""
@@ -4012,6 +4054,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reset_user", reset_user_command))
     app.add_handler(CommandHandler("reset_all_requests", reset_all_requests_command))
     app.add_handler(CommandHandler("rehome", rehome_command))
+    app.add_handler(CommandHandler("view_photo", view_photo_command))
     app.add_handler(CommandHandler("edit_about", edit_about_command))
     app.add_handler(CommandHandler("set_field", set_field_command))
     app.add_handler(CallbackQueryHandler(interest_clicked, pattern=r"^interest:"))
