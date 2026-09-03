@@ -2416,7 +2416,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if action == "decline":
-        if is_owner and not is_admin:
+        if is_owner or is_admin:
             await query.answer()
             await context.bot.send_message(
                 chat_id=user.id,
