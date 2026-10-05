@@ -645,6 +645,7 @@ async def complete_decline(request_id: int, user, context, reason_text: str) -> 
 
     supabase.table("requests").update({
         "status": "declined",
+        "is_active_request": False,
         "decided_at": datetime.now(timezone.utc).isoformat(),
         "decided_by_admin": user.id,
     }).eq("id", request_id).execute()
@@ -1413,6 +1414,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     supabase.table("requests").update({
         "status": "withdrawn",
+        "is_active_request": False,
         "decided_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", active_request_id).execute()
 
@@ -1421,6 +1423,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         supabase.table("requests").update({
             "status": "withdrawn",
+            "is_active_request": False,
             "decided_at": datetime.now(timezone.utc).isoformat(),
         }).eq("requester_telegram_user_id", user.id).eq("status", "pending").execute()
     except Exception as e:
@@ -1973,6 +1976,7 @@ async def reset_all_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     supabase.table("requests").update({
         "status": "withdrawn",
+        "is_active_request": False,
         "decided_at": datetime.now(timezone.utc).isoformat(),
     }).eq("status", "pending").execute()
 
@@ -2014,7 +2018,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         .execute()
     )
 
-    if state_result.data and state_result.data[0].get("state") == "locked":
+    if state_result.data and state_result.data[0].get("state") in ["locked", "queued"]:
         await query.answer(
             "You already have an active interest request. One at a time — withdraw it first (/withdraw) if you'd like to change. 🤲",
             show_alert=True,
@@ -2257,10 +2261,32 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text="JazakAllah khayran. Take the time you need to " + consult_line + ". May Allah guide you to what is best. 🤲\n\n"
                  "📌 So you know how it works: the request stays open for 5 days. If no decision is made by then, it closes gently on its own — no blame on anyone, and they're freed to look elsewhere.",
         )
+        try:
+            await context.bot.send_message(
+                chat_id=requester_id,
+                text="🤲 An update on your interest in profile " + profile_id + ": they have seen it and asked for a little time to consider. "
+                     "You'll hear either way within 5 days. JazakAllah khayran for your patience.",
+            )
+        except Exception as e:
+            logging.warning("Consider notify (requester) failed: " + str(e))
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_TELEGRAM_USER_ID,
+                text="🕰 Considering: profile " + profile_id + " request " + str(request_id) + " from @" + str(req.get("requester_username") or "?") + " — 5-day clock started.",
+            )
+        except Exception as e:
+            logging.warning("Consider notify (admin) failed: " + str(e))
         return
 
     if action in ("approve", "approve_photo"):
         share_photos = (action == "approve_photo")
+
+        if profile.get("is_matched"):
+            await query.answer(
+                "You're already in an introduction on this profile. If that has ended, send /available first, then approve. 🤲",
+                show_alert=True,
+            )
+            return
 
         contact_lines, wali_missing = format_contact_details(profile)
 
@@ -2336,6 +2362,11 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         await context.bot.send_photo(chat_id=owner_tg_id, photo=requester_photo,
                             caption="📷 Shared with their approval — " + (requester_own_profile["id"] if requester_own_profile else ""))
                         photo_swap_done = True
+                        for _cid in (requester_id, owner_tg_id):
+                            try:
+                                await context.bot.send_message(chat_id=_cid, text="📷 Your photo has been sent to them.")
+                            except Exception:
+                                pass
                     except Exception as e:
                         logging.warning("Photo swap failed: " + str(e))
 
@@ -2343,11 +2374,12 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await context.bot.send_message(
                     chat_id=requester_id,
                     text=(
-                        "💚 Alhamdulillah — your interest has been approved.\n\n"
-                        "Below are their contact details. Please reach out with respect, patience, "
+                        "💚 Alhamdulillah — your interest in profile " + profile_id + " has been approved.\n\n"
+                        "Below are the contact details for this introduction. Please reach out with respect, patience, "
                         "and good character.\n\n"
                         + contact_lines + "\n\n"
-                        "From here, it is between you both, your walis, and Allah. May He put barakah in it. 🤲"
+                        "Next step: " + ("message her wali to introduce yourself and your family." if is_sister else "you (or your wali) can make contact.") + " "
+                        "From here, it is between you both, your walis, and Allah. Mithaq steps back now. May He put barakah in it. 🤲"
                         + pause_note
                     ),
                     reply_markup=available_menu_markup(),
@@ -2357,14 +2389,20 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if owner_tg_id and (is_owner or is_admin):
             requester_contact_lines, _ = format_contact_details(requester_own_profile) if requester_own_profile else ("", False)
+            _req_name = ((requester_own_profile or {}).get("name") or "").strip()
+            _req_label = ((_req_name + " (" + requester_own_profile["id"] + ")") if (_req_name and requester_own_profile)
+                          else (requester_own_profile["id"] if requester_own_profile else "the member"))
             owner_msg = (
-                "💚 Alhamdulillah — you approved the interest from "
-                + (requester_own_profile["id"] if requester_own_profile else "the member") + ". "
-                "Contact details have been exchanged.\n\n"
+                "💚 Alhamdulillah — you approved the interest from " + _req_label + ".\n\n"
+                "They have been given " + ("your wali's contact" if is_sister else "your contact details") + ". "
             )
             if requester_contact_lines:
-                owner_msg += "Here are their contact details:\n" + requester_contact_lines + "\n\n"
-            owner_msg += "May Allah put barakah in it. 🤲" + pause_note
+                owner_msg += "And here are theirs, so either side can make the first move:\n" + requester_contact_lines + "\n\n"
+            else:
+                owner_msg += "\n\n"
+            owner_msg += ("Next step: " + ("they will contact your wali, or your wali can contact them. " if is_sister else "make contact when you're ready. ")
+                          + "Mithaq steps back now — from here it is between the families and Allah. May He put barakah in it. 🤲"
+                          + pause_note)
             try:
                 await context.bot.send_message(
                     chat_id=owner_tg_id,
@@ -2390,6 +2428,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         for r in (remaining.data or []):
             supabase.table("requests").update({
                 "status": "declined",
+                "is_active_request": False,
                 "decided_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", r["id"]).execute()
             supabase.table("user_state").update({
@@ -2407,6 +2446,52 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
             except Exception as e:
                 logging.warning("Could not notify queued requester: " + str(e))
+
+        # ── Close the requester's other threads too: their own other pending requests,
+        #    and any pending requests sitting on their own profile ──
+        try:
+            others = (
+                supabase.table("requests").select("*")
+                .eq("requester_telegram_user_id", requester_id)
+                .eq("status", "pending").neq("id", request_id).execute()
+            )
+            for r in (others.data or []):
+                supabase.table("requests").update({
+                    "status": "withdrawn",
+                    "is_active_request": False,
+                    "decided_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", r["id"]).execute()
+                if r.get("is_active_request"):
+                    await advance_queue(r["profile_id"], context, repost_if_empty=False)
+            if requester_own_profile:
+                on_own = (
+                    supabase.table("requests").select("*")
+                    .eq("profile_id", requester_own_profile["id"])
+                    .eq("status", "pending").execute()
+                )
+                for r in (on_own.data or []):
+                    supabase.table("requests").update({
+                        "status": "declined",
+                        "is_active_request": False,
+                        "decided_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", r["id"]).execute()
+                    supabase.table("user_state").update({
+                        "active_request_id": None,
+                        "state": "free",
+                    }).eq("telegram_user_id", r["requester_telegram_user_id"]).execute()
+                    try:
+                        await context.bot.send_message(
+                            chat_id=r["requester_telegram_user_id"],
+                            text=(
+                                "JazakAllahu khayran for your interest in profile " + requester_own_profile["id"] + ". "
+                                "Unfortunately this profile is no longer available. "
+                                "You are welcome to express interest in another profile. 🤲"
+                            ),
+                        )
+                    except Exception as e:
+                        logging.warning("Could not notify requester on own-profile close: " + str(e))
+        except Exception as e:
+            logging.warning("Closing requester's other threads failed: " + str(e))
 
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -2505,6 +2590,7 @@ async def withdraw_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     supabase.table("requests").update({
         "status": "withdrawn",
+        "is_active_request": False,
         "decided_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", request_id).execute()
 
@@ -2727,11 +2813,11 @@ async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
             supabase.table("requests")
             .select("*")
             .eq("status", "pending")
-            .not_.is_("consideration_started_at", "null")
+            .eq("is_active_request", True)
             .execute()
         )
         for req in (considering.data or []):
-            started_raw = req.get("consideration_started_at")
+            started_raw = req.get("consideration_started_at") or req.get("created_at")
             try:
                 started = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
             except Exception:
@@ -2749,6 +2835,7 @@ async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
             if age >= timedelta(days=5):
                 supabase.table("requests").update({
                     "status": "closed",
+                    "is_active_request": False,
                     "decided_at": now.isoformat(),
                 }).eq("id", req["id"]).execute()
 
@@ -2792,7 +2879,7 @@ async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
 
             # ── 2-day nudge ──
-            if age >= timedelta(days=2) and not req.get("consideration_nudge_sent"):
+            if age >= timedelta(days=2) and req.get("consideration_started_at") and not req.get("consideration_nudge_sent"):
                 if owner_tg:
                     try:
                         await context.bot.send_message(
