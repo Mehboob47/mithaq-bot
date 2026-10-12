@@ -1723,6 +1723,41 @@ async def post_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("✅ Profile " + profile_id + " posted to channel.")
 
 
+async def photo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin only: /photo MTHAQ-001 — sends the stored profile photo to the admin."""
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /photo MTHAQ-001")
+        return
+
+    profile_id = context.args[0].upper()
+
+    result = (
+        supabase.table("profiles")
+        .select("id, photo_file_id, photo_url")
+        .eq("id", profile_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not result.data:
+        await update.message.reply_text("Profile " + profile_id + " not found.")
+        return
+
+    photo_ref = get_photo_ref(result.data[0])
+    if not photo_ref:
+        await update.message.reply_text("No photo on file for " + profile_id + ".")
+        return
+
+    try:
+        await context.bot.send_photo(chat_id=user.id, photo=photo_ref, caption="📷 " + profile_id)
+    except Exception as e:
+        await update.message.reply_text("Couldn't send photo for " + profile_id + ": " + str(e))
+
+
 async def bump_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or user.id != ADMIN_TELEGRAM_USER_ID:
@@ -2259,7 +2294,7 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await context.bot.send_message(
             chat_id=user.id,
             text="JazakAllah khayran. Take the time you need to " + consult_line + ". May Allah guide you to what is best. 🤲\n\n"
-                 "📌 So you know how it works: the request stays open for 5 days. If no decision is made by then, it closes gently on its own — no blame on anyone, and they're freed to look elsewhere.",
+                 "📌 So you know how it works: the request stays open for 5 days. While you're considering, anyone else who expresses interest in you is held in a queue — you won't see them until you've decided on this one. If no decision is made by then, it closes gently on its own — no blame on anyone, and they're freed to look elsewhere.",
         )
         try:
             await context.bot.send_message(
@@ -2998,6 +3033,7 @@ def main() -> None:
     application.add_handler(CommandHandler("dashboard", dashboard))
     application.add_handler(CommandHandler("post_profile", post_profile))
     application.add_handler(CommandHandler("bump", bump_profile))
+    application.add_handler(CommandHandler("photo", photo_command))
     application.add_handler(CommandHandler("set_field", set_field))
     application.add_handler(CommandHandler("edit_about", edit_about))
     application.add_handler(CommandHandler("set_wali", set_wali))
