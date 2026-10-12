@@ -2104,7 +2104,6 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         .select("id", count="exact")
         .eq("profile_id", profile_id)
         .eq("status", "pending")
-        .eq("is_active_request", True)
         .execute()
     )
     queue_position = (queue_count.count or 0) + 1
@@ -2145,6 +2144,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "🕰️ You're in the queue for profile " + profile_id + "\n\n"
                 "Someone else is currently being considered for this profile. Mithaq works "
                 "one introduction at a time, out of respect for everyone involved.\n\n"
+                "You are number " + str(queue_position) + " in the queue. "
                 "Your place is held. If the current introduction doesn't proceed, you'll be "
                 "notified the moment it's your turn insha'Allah. 🤲\n\n"
                 "You are free to express interest in other profiles while you wait.\n"
