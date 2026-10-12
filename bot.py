@@ -2137,7 +2137,7 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     }).eq("telegram_user_id", user.id).execute()
 
     if someone_active:
-        await query.answer("You've been added to the queue. 🤲", show_alert=True)
+        await query.answer("You've been added to the queue — you're number " + str(queue_position) + ". 🤲", show_alert=True)
         await context.bot.send_message(
             chat_id=user.id,
             text=(
