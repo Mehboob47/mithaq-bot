@@ -1758,6 +1758,45 @@ async def photo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Couldn't send photo for " + profile_id + ": " + str(e))
 
 
+async def _admin_set_paused(update: Update, context: ContextTypes.DEFAULT_TYPE, paused: bool) -> None:
+    """Shared body for /pause and /unpause (admin only)."""
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        return
+
+    cmd = "/pause" if paused else "/unpause"
+    if not context.args:
+        await update.message.reply_text("Usage: " + cmd + " MTHAQ-001")
+        return
+
+    profile_id = context.args[0].upper()
+
+    result = (
+        supabase.table("profiles")
+        .select("id, is_paused")
+        .eq("id", profile_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not result.data:
+        await update.message.reply_text("Profile " + profile_id + " not found.")
+        return
+
+    supabase.table("profiles").update({"is_paused": paused}).eq("id", profile_id).execute()
+    await update.message.reply_text(
+        ("⏸ " if paused else "▶️ ") + profile_id + (" paused." if paused else " unpaused.")
+    )
+
+
+async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _admin_set_paused(update, context, True)
+
+
+async def unpause_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _admin_set_paused(update, context, False)
+
+
 async def bump_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or user.id != ADMIN_TELEGRAM_USER_ID:
@@ -2364,6 +2403,26 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "/available) so you return to the pool. Otherwise you'll stay paused."
         )
 
+        photo_swap_done = False
+        if share_photos:
+            requester_photo = get_photo_ref(requester_own_profile)
+            owner_photo = get_photo_ref(profile)
+            if requester_photo and owner_photo:
+                try:
+                    await context.bot.send_photo(chat_id=requester_id, photo=owner_photo,
+                        caption="📷 Shared with their approval — profile " + profile_id)
+                    await context.bot.send_photo(chat_id=owner_tg_id, photo=requester_photo,
+                        caption="📷 Shared with their approval — " + (requester_own_profile["id"] if requester_own_profile else ""))
+                    photo_swap_done = True
+                    for _cid in (requester_id, owner_tg_id):
+                        try:
+                            await context.bot.send_message(chat_id=_cid, text="📷 Your photo has been sent to them.")
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logging.warning("Photo swap failed: " + str(e))
+
+
         if wali_missing:
             try:
                 await context.bot.send_message(
@@ -2386,25 +2445,6 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 ),
             )
         else:
-            photo_swap_done = False
-            if share_photos:
-                requester_photo = get_photo_ref(requester_own_profile)
-                owner_photo = get_photo_ref(profile)
-                if requester_photo and owner_photo:
-                    try:
-                        await context.bot.send_photo(chat_id=requester_id, photo=owner_photo,
-                            caption="📷 Shared with their approval — profile " + profile_id)
-                        await context.bot.send_photo(chat_id=owner_tg_id, photo=requester_photo,
-                            caption="📷 Shared with their approval — " + (requester_own_profile["id"] if requester_own_profile else ""))
-                        photo_swap_done = True
-                        for _cid in (requester_id, owner_tg_id):
-                            try:
-                                await context.bot.send_message(chat_id=_cid, text="📷 Your photo has been sent to them.")
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        logging.warning("Photo swap failed: " + str(e))
-
             try:
                 await context.bot.send_message(
                     chat_id=requester_id,
@@ -3034,6 +3074,8 @@ def main() -> None:
     application.add_handler(CommandHandler("post_profile", post_profile))
     application.add_handler(CommandHandler("bump", bump_profile))
     application.add_handler(CommandHandler("photo", photo_command))
+    application.add_handler(CommandHandler("pause", pause_command))
+    application.add_handler(CommandHandler("unpause", unpause_command))
     application.add_handler(CommandHandler("set_field", set_field))
     application.add_handler(CommandHandler("edit_about", edit_about))
     application.add_handler(CommandHandler("set_wali", set_wali))
