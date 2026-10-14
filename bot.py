@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import threading
 import requests
 from datetime import datetime, timezone, timedelta, date
@@ -393,13 +394,51 @@ def country_flag(country: str) -> str:
     return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in iso.upper())
 
 
+_PRIV_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_PRIV_URL = re.compile(r"(?:https?://\S+|www\.\S+|\b(?:t\.me|wa\.me|instagram\.com|facebook\.com|tiktok\.com|snapchat\.com|linkedin\.com)/\S+)", re.I)
+_PRIV_PHONE = re.compile(r"(?<!\w)\+?\d[\d\s().-]{7,}\d")
+_PRIV_HANDLE = re.compile(r"(?<![\w@])@[A-Za-z0-9_.]{3,}")
+
+
+def _scrub_private(text: str) -> str:
+    """Remove obvious private identifiers (emails, links, phone numbers, @handles) from free text."""
+    if not text:
+        return text
+    text = _PRIV_EMAIL.sub("[contact removed]", text)
+    text = _PRIV_URL.sub("[link removed]", text)
+    text = _PRIV_PHONE.sub("[number removed]", text)
+    text = _PRIV_HANDLE.sub("[contact removed]", text)
+    return text
+
+
+def _clean_free_text(text: str, p: dict, max_len: int) -> str:
+    """Scrub private info and the member's own name from a free-text field, then cap its length
+    (cutting at a sentence or word boundary) so one long answer can't push the post over Telegram's limit."""
+    text = _scrub_private(str(text or "")).strip()
+    if not text:
+        return text
+    for tok in re.split(r"\s+", str(p.get("name") or "").strip()):
+        tok = re.sub(r"[^\w'-]", "", tok)
+        if len(tok) >= 3 and tok.isalpha():
+            text = re.sub(r"\b" + re.escape(tok) + r"\b", "[name removed]", text, flags=re.I)
+    if len(text) > max_len:
+        cut = text[:max_len]
+        end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "), cut.rfind("\n"))
+        if end >= max_len * 0.6:
+            cut = cut[:end + 1]
+        else:
+            cut = cut.rsplit(" ", 1)[0]
+        text = cut.rstrip() + " …"
+    return text
+
+
 def build_profile_text(p: dict) -> str:
     raw = p.get("formatted_text") or ""
     if raw:
         lines = raw.split("\n")
         if lines and "BROTHER" not in lines[0] and "SISTER" not in lines[0]:
             lines = lines[1:]
-        return "\n".join(lines)
+        return _scrub_private("\n".join(lines))
 
     gender = (p.get("gender") or "").lower()
     gender_emoji = "🟣" if ("female" in gender or "sister" in gender) else "🔵"
@@ -442,18 +481,18 @@ def build_profile_text(p: dict) -> str:
 
     if p.get('about'):
         lines.append("✨ About:")
-        lines.append(p['about'])
+        lines.append(_clean_free_text(p['about'], p, 1500))
 
     lines.append("")
 
     if p.get('pref_age_range'):    lines.append(f"🎂 Preferred age: {p['pref_age_range']}")
     if p.get('spouse_deen_level'): lines.append(f"❤️ Spouse deen level: {p['spouse_deen_level']}")
     if p.get('marriage_dynamic'):  lines.append(f"🤝 Marriage dynamic: {p['marriage_dynamic']}")
-    if p.get('looking_for'):       lines.append(f"🔍 Looking for: {p['looking_for']}")
+    if p.get('looking_for'):       lines.append(f"🔍 Looking for: {_clean_free_text(p['looking_for'], p, 700)}")
 
     if p.get('additional'):
         lines.append("")
-        lines.append(f"ℹ️ Also worth knowing: {p['additional']}")
+        lines.append(f"ℹ️ Also worth knowing: {_clean_free_text(p['additional'], p, 500)}")
 
     return "\n".join(lines)
 
