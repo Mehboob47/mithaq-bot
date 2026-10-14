@@ -1853,6 +1853,64 @@ async def unpause_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _admin_set_paused(update, context, False)
 
 
+async def free_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /free MTHAQ-001 MTHAQ-002 ... — end a stuck match: unmatch + unpause each
+    profile, reset the owner's state, and message the owner automatically."""
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /free MTHAQ-001 MTHAQ-002 ...")
+        return
+
+    lines = []
+    for raw in context.args:
+        pid = raw.strip().upper()
+        res = (
+            supabase.table("profiles")
+            .select("id, owner_telegram_user_id")
+            .eq("id", pid)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            lines.append("❌ " + pid + " not found")
+            continue
+
+        supabase.table("profiles").update({
+            "is_matched": False,
+            "is_paused": False,
+        }).eq("id", pid).execute()
+
+        owner_id = res.data[0].get("owner_telegram_user_id")
+        if not owner_id:
+            lines.append("✅ " + pid + " freed — no Telegram linked, so not messaged")
+            continue
+
+        supabase.table("user_state").update({
+            "state": "free",
+            "active_request_id": None,
+        }).eq("telegram_user_id", owner_id).execute()
+
+        try:
+            await context.bot.send_message(
+                chat_id=owner_id,
+                text=(
+                    "Assalamu alaikum 🤲\n\n"
+                    "Your profile " + pid + " had been paused after an introduction that has since ended. "
+                    "It is now active again and visible to members, and you can express interest again. "
+                    "Apologies that this wasn't flagged to you sooner.\n\n"
+                    "📢 Browse here: " + CHANNEL_LINK
+                ),
+            )
+            lines.append("✅ " + pid + " freed and messaged")
+        except Exception as e:
+            lines.append("✅ " + pid + " freed — message failed (" + str(e)[:60] + ")")
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def bump_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or user.id != ADMIN_TELEGRAM_USER_ID:
@@ -3132,6 +3190,7 @@ def main() -> None:
     application.add_handler(CommandHandler("photo", photo_command))
     application.add_handler(CommandHandler("pause", pause_command))
     application.add_handler(CommandHandler("unpause", unpause_command))
+    application.add_handler(CommandHandler("free", free_command))
     application.add_handler(CommandHandler("set_field", set_field))
     application.add_handler(CommandHandler("edit_about", edit_about))
     application.add_handler(CommandHandler("set_wali", set_wali))
