@@ -1560,6 +1560,62 @@ async def _make_available(user, context, reply_func) -> None:
         text="🔄 Reactivation via /available — " + " & ".join(updated_ids) + " are available again (match ended).",
     )
 
+    # Tell the other party the introduction has ended (they were previously told nothing).
+    try:
+        matched_ids = [p["id"] for p in profile_result.data if p.get("is_matched")]
+        if matched_ids:
+            candidates = []
+            for pid in matched_ids:
+                r = (
+                    supabase.table("requests")
+                    .select("requester_telegram_user_id, decided_at")
+                    .eq("profile_id", pid).eq("status", "approved")
+                    .order("decided_at", desc=True).limit(1).execute()
+                )
+                if r.data:
+                    candidates.append((r.data[0].get("decided_at") or "", pid, r.data[0]["requester_telegram_user_id"]))
+            r2 = (
+                supabase.table("requests")
+                .select("profile_id, decided_at")
+                .eq("requester_telegram_user_id", user.id).eq("status", "approved")
+                .order("decided_at", desc=True).limit(1).execute()
+            )
+            if r2.data:
+                op = supabase.table("profiles").select("owner_telegram_user_id").eq("id", r2.data[0]["profile_id"]).limit(1).execute()
+                if op.data and op.data[0].get("owner_telegram_user_id"):
+                    candidates.append((r2.data[0].get("decided_at") or "", r2.data[0]["profile_id"], op.data[0]["owner_telegram_user_id"]))
+            if candidates:
+                candidates.sort(key=lambda c: c[0], reverse=True)
+                _, other_pid, other_tg = candidates[0]
+                if other_tg and other_tg != user.id:
+                    # Free the other party too: their match has ended, so they must not stay paused/matched.
+                    supabase.table("profiles").update({
+                        "is_matched": False,
+                        "is_paused": False,
+                    }).eq("owner_telegram_user_id", other_tg).execute()
+                    supabase.table("user_state").update({
+                        "state": "free",
+                        "active_request_id": None,
+                    }).eq("telegram_user_id", other_tg).execute()
+                    await context.bot.send_message(
+                        chat_id=other_tg,
+                        text=(
+                            "ℹ️ An update on your introduction (profile " + other_pid + "): the other party has ended it.\n\n"
+                            "Your profile is active again and back in the pool, so you can receive and express interest again. "
+                            "JazakAllah khayran for your patience — may Allah grant you what is best. 🤲\n\n"
+                            "📢 Browse here: " + CHANNEL_LINK
+                        ),
+                    )
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_TELEGRAM_USER_ID,
+                            text="🔔 Other party of the ended match (profile " + other_pid + ") was told and re-activated automatically.",
+                        )
+                    except Exception:
+                        pass
+    except Exception as e:
+        logging.warning("Could not notify other party of ended match: " + str(e))
+
 
 # ── Photo upload flow ──────────────────────────────────────────────────────────
 
