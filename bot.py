@@ -2555,9 +2555,25 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 chat_id=ADMIN_TELEGRAM_USER_ID,
                 text=(
                     "⚠️ HOLD — approval on " + profile_id + " (request " + str(request_id) + ") but the sister has NO wali contact on file.\n"
-                    "Contact her, then run /set_wali " + profile_id + " +NUMBER to release the details."
+                    "Contact her, then run /set_wali " + profile_id + " +NUMBER to release the details.\n"
+                    "(The bot has also asked her for it directly — if she replies, it saves and releases automatically.)"
                 ),
             )
+            if owner_tg_id:
+                try:
+                    context.application.user_data[owner_tg_id]["awaiting_wali_for"] = profile_id
+                    await context.bot.send_message(
+                        chat_id=owner_tg_id,
+                        text=(
+                            "🤲 You've approved this interest, but the introduction is on hold: we don't have your wali's contact.\n\n"
+                            "Nothing can be shared with him until we do. Please reply to this message now with your wali's "
+                            "phone number (with country code) or Telegram username. It takes 10 seconds, and it keeps the "
+                            "introduction going through your wali, as it should.\n\n"
+                            "No wali? Reply NONE and Mithaq will help you."
+                        ),
+                    )
+                except Exception as e:
+                    logging.warning("Could not ask owner for wali: " + str(e))
         else:
             try:
                 await context.bot.send_message(
@@ -2583,7 +2599,8 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                           else (requester_own_profile["id"] if requester_own_profile else "the member"))
             owner_msg = (
                 "💚 Alhamdulillah — you approved the interest from " + _req_label + ".\n\n"
-                "They have been given " + ("your wali's contact" if is_sister else "your contact details") + ". "
+                + ("They will be given your wali's contact as soon as you send it. " if (is_sister and wali_missing) else
+                   "They have been given " + ("your wali's contact" if is_sister else "your contact details") + ". ")
             )
             if requester_contact_lines:
                 owner_msg += "And here are theirs, so either side can make the first move:\n" + requester_contact_lines + "\n\n"
@@ -2733,9 +2750,67 @@ async def decline_reason_clicked(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer("Declined with reason shared. 🤲")
 
 
+async def _handle_wali_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, profile_id: str) -> None:
+    """A sister replied with her wali's contact after an approval was held."""
+    text = (update.message.text or "").strip()
+    low = text.lower().strip(" .!")
+
+    if low in ("none", "no", "no wali", "i dont have one", "i don't have one", "i have no wali"):
+        context.user_data.pop("awaiting_wali_for", None)
+        await update.message.reply_text("Understood, jazakillah khayran. Mithaq will be in touch with you shortly. 🤲")
+        await context.bot.send_message(
+            chat_id=ADMIN_TELEGRAM_USER_ID,
+            text="⚠️ " + profile_id + " replied that she has NO wali. Approval is still on hold — please contact her.",
+        )
+        return
+
+    looks_valid = len(text) >= 6 and (any(ch.isdigit() for ch in text) or text.startswith("@") or "t.me/" in low)
+    if not looks_valid:
+        await update.message.reply_text(
+            "That doesn't look like a phone number or Telegram username. Please send your wali's number "
+            "(with country code, e.g. +44…) or @username, or reply NONE if you don't have one."
+        )
+        return
+
+    context.user_data.pop("awaiting_wali_for", None)
+    supabase.table("profiles").update({"wali_contact": text, "no_wali": False}).eq("id", profile_id).execute()
+
+    released = False
+    waiting = (
+        supabase.table("requests").select("*")
+        .eq("profile_id", profile_id).eq("status", "approved")
+        .order("decided_at", desc=True).limit(1).execute()
+    )
+    if waiting.data:
+        try:
+            await context.bot.send_message(
+                chat_id=waiting.data[0]["requester_telegram_user_id"],
+                text=(
+                    "💚 Alhamdulillah — the introduction details for profile " + profile_id + " are ready.\n\n"
+                    "👤 Wali contact: " + text + "\n\n"
+                    "Please reach out with respect, patience, and good character. "
+                    "From here, it is between you both, your walis, and Allah. May He put barakah in it. 🤲"
+                ),
+            )
+            released = True
+        except Exception as e:
+            logging.warning("Could not release wali details: " + str(e))
+
+    await update.message.reply_text("Jazakillah khayran — saved and passed on. 🤲" if released else "Jazakillah khayran — saved. 🤲")
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_USER_ID,
+        text="✅ " + profile_id + " sent her wali contact herself — saved" + (" and released to the requester." if released else "; nothing was waiting to release."),
+    )
+
+
 async def text_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or not update.message:
+        return
+
+    awaiting_wali = context.user_data.get("awaiting_wali_for")
+    if awaiting_wali:
+        await _handle_wali_reply(update, context, awaiting_wali)
         return
 
     awaiting = context.user_data.get("awaiting_decline_reason_for")
