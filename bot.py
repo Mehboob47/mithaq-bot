@@ -465,6 +465,7 @@ def build_profile_text(p: dict) -> str:
     if p.get('ethnicity'):           lines.append(f"🧬 Ethnicity: {p['ethnicity']}")
     if p.get('marital_status'):      lines.append(f"💍 Marital status: {p['marital_status']}")
     if p.get('children'):            lines.append(f"👶 Has children: {p['children']}")
+    if p.get('open_to_polygamy'):    lines.append(f"💍 Open to a married brother: {p['open_to_polygamy']}")
     if p.get('willing_to_relocate'): lines.append(f"🧳 Willing to relocate: {p['willing_to_relocate']}")
 
     lines.append("")
