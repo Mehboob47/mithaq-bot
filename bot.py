@@ -406,7 +406,7 @@ def _scrub_private(text: str) -> str:
         return text
     text = _PRIV_EMAIL.sub("[contact removed]", text)
     text = _PRIV_URL.sub("[link removed]", text)
-    text = _PRIV_PHONE.sub("[number removed]", text)
+    text = _PRIV_PHONE.sub(lambda m: "[number removed]" if sum(c.isdigit() for c in m.group(0)) >= 9 else m.group(0), text)
     text = _PRIV_HANDLE.sub("[contact removed]", text)
     return text
 
