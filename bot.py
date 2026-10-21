@@ -3283,6 +3283,106 @@ def send_reminder_email(to_email: str, profile_id: str) -> None:
         logging.warning("Reminder email failed: " + str(e))
 
 
+# ── Admin: ask sisters where they heard about Mithaq ───────────────────────────
+
+SOURCE_OPTIONS = {
+    "khalid": "Umm Khalid",
+    "wife": "Wife School / Marriage School",
+    "insta": "Instagram",
+    "fb": "Facebook",
+    "friend": "WhatsApp / a friend",
+    "other": "Other",
+}
+
+
+async def ask_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /ask_source MTHAQ-001 MTHAQ-002 ... — ask each profile owner where she heard
+    about Mithaq (buttons). Skips profiles with no Telegram linked or an answer already saved."""
+    user = update.effective_user
+    if not user or user.id != ADMIN_TELEGRAM_USER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /ask_source MTHAQ-001 MTHAQ-002 ...")
+        return
+
+    lines = []
+    for raw in context.args:
+        pid = raw.strip().upper()
+        res = (
+            supabase.table("profiles")
+            .select("id, owner_telegram_user_id, heard_about_detail")
+            .eq("id", pid)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            lines.append("❌ " + pid + " not found")
+            continue
+
+        row = res.data[0]
+        owner_id = row.get("owner_telegram_user_id")
+        if not owner_id:
+            lines.append("➖ " + pid + " — no Telegram linked, not asked")
+            continue
+        if (row.get("heard_about_detail") or "").strip():
+            lines.append("➖ " + pid + " — already answered, skipped")
+            continue
+
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(label, callback_data="src:" + pid + ":" + key)]
+             for key, label in SOURCE_OPTIONS.items()]
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=owner_id,
+                text=(
+                    "Assalamu alaikum 🤲\n\n"
+                    "One quick question to help us improve Mithaq: where did you first hear about us?"
+                ),
+                reply_markup=keyboard,
+            )
+            lines.append("✅ " + pid + " asked")
+        except Exception as e:
+            lines.append("⚠️ " + pid + " — message failed (" + str(e)[:60] + ")")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def source_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = query.from_user
+
+    try:
+        _, pid, key = query.data.split(":", 2)
+    except ValueError:
+        await query.answer()
+        return
+
+    label = SOURCE_OPTIONS.get(key)
+    res = (
+        supabase.table("profiles")
+        .select("id, owner_telegram_user_id, heard_about_detail")
+        .eq("id", pid)
+        .limit(1)
+        .execute()
+    )
+    if not label or not res.data or res.data[0].get("owner_telegram_user_id") != user.id:
+        await query.answer()
+        return
+
+    if not (res.data[0].get("heard_about_detail") or "").strip():
+        supabase.table("profiles").update({
+            "heard_about_detail": label + " (via bot)",
+        }).eq("id", pid).execute()
+
+    try:
+        await query.edit_message_text("Jazakillah khayran, noted. 🤲")
+    except Exception:
+        pass
+    await query.answer()
+
+
 # ── Wiring ─────────────────────────────────────────────────────────────────────
 
 def run_flask():
@@ -3312,6 +3412,7 @@ def main() -> None:
     application.add_handler(CommandHandler("rehome", rehome))
     application.add_handler(CommandHandler("resend_requests", resend_requests))
     application.add_handler(CommandHandler("reset_all_requests", reset_all_requests))
+    application.add_handler(CommandHandler("ask_source", ask_source_command))
 
     application.add_handler(CallbackQueryHandler(interest_clicked, pattern="^interest:"))
     application.add_handler(CallbackQueryHandler(interest_cancel_clicked, pattern="^interest_cancel$"))
@@ -3323,6 +3424,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(avail_menu_clicked, pattern="^avail_menu$"))
     application.add_handler(CallbackQueryHandler(addphoto_start_clicked, pattern="^addphoto_start$"))
     application.add_handler(CallbackQueryHandler(addphoto_notnow_clicked, pattern="^addphoto_notnow$"))
+    application.add_handler(CallbackQueryHandler(source_clicked, pattern="^src:"))
 
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, photo_received))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message_router))
