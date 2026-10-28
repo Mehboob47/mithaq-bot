@@ -36,7 +36,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_TELEGRAM_USER_ID = int(os.environ["ADMIN_TELEGRAM_USER_ID"])
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "mithaq-secret-2026")
-SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 CHANNEL_LINK = "https://t.me/+ilWsgu9hLb02ODQ0"
 
 # ── Repost marker ──────────────────────────────────────────────────────────────
@@ -713,6 +713,14 @@ async def complete_decline(request_id: int, user, context, reason_text: str) -> 
     except Exception as e:
         logging.warning("Could not notify requester of decline: " + str(e))
 
+    try:
+        _req_prof = get_requester_profile(req.get("requester_username") or "", requester_id)
+        _req_email = ((_req_prof or {}).get("email") or "").strip()
+        if _req_email:
+            send_decline_email(_req_email, profile_id, reason_text)
+    except Exception as e:
+        logging.warning("Decline email lookup failed: " + str(e))
+
     await context.bot.send_message(
         chat_id=ADMIN_TELEGRAM_USER_ID,
         text="❌ Declined: profile " + profile_id + " request " + str(request_id) + " by @" + str(user.username or user.id) + "\nReason: " + reason_text,
@@ -797,10 +805,12 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
     owner_tg_id = None
     owner_username = ""
     owner_photo_url = None
+    owner_email = ""
     if profile_result.data:
         owner_tg_id = profile_result.data[0].get("owner_telegram_user_id")
         owner_username = (profile_result.data[0].get("owner_telegram_username") or "")
         owner_photo_url = get_photo_ref(profile_result.data[0])
+        owner_email = (profile_result.data[0].get("email") or "").strip()
 
     await context.bot.send_message(
         chat_id=next_requester_id,
@@ -853,6 +863,9 @@ async def advance_queue(profile_id: str, context, repost_if_empty: bool = False)
             sent_to_owner = True
         except Exception as e:
             logging.warning("Could not message owner: " + str(e))
+
+    if owner_email:
+        send_interest_email(owner_email, profile_id)
 
     admin_text += "\n\n✅ Request sent to owner." if sent_to_owner else "\n\n⚠️ Owner not registered — approve/decline below."
 
@@ -2412,6 +2425,10 @@ async def interest_clicked(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except Exception as e:
             logging.warning("Could not message owner: " + str(e))
 
+    owner_email = (profile.get("email") or "").strip()
+    if owner_email:
+        send_interest_email(owner_email, profile_id)
+
     if sent_to_owner:
         admin_text += "\n\n✅ Request sent to owner. You can also approve/decline below."
     else:
@@ -2662,6 +2679,14 @@ async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             chat_id=ADMIN_TELEGRAM_USER_ID,
             text="✅ Approved: profile " + profile_id + " request " + str(request_id) + " from @" + requester_username + " by @" + str(user.username or user.id),
         )
+
+        # ── Approval emails (no contact details in email; those stay in Telegram) ──
+        _req_email = ((requester_own_profile or {}).get("email") or "").strip()
+        if _req_email:
+            send_approval_email(_req_email, profile_id, is_requester=True)
+        _own_email = (profile.get("email") or "").strip()
+        if _own_email:
+            send_approval_email(_own_email, profile_id, is_requester=False)
 
         # ── Close remaining queue: this profile is now in an introduction ──
         remaining = (
@@ -3134,6 +3159,7 @@ async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
                 .eq("id", profile_id).limit(1).execute()
             )
             owner_tg = prof.data[0].get("owner_telegram_user_id") if prof.data else None
+            owner_email = (prof.data[0].get("email") or "").strip() if prof.data else ""
 
             # ── 5-day close ──
             if age >= timedelta(days=5):
@@ -3153,7 +3179,7 @@ async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
                         chat_id=req["requester_telegram_user_id"],
                         text=(
                             "JazakAllah khayran for your interest in profile " + profile_id + " and for your patience. "
-                            "This one didn't move forward to a decision in time, so it has now been closed. "
+                            "They didn't respond within 5 days, so it has now been closed. "
                             "You are free to express interest in another profile whenever you're ready. "
                             "May Allah guide you to what is best for you. 🤲"
                         ),
@@ -3174,6 +3200,16 @@ async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
                     except Exception as e:
                         logging.warning("Close notify (owner) failed: " + str(e))
 
+                if owner_email:
+                    send_consideration_email(
+                        owner_email,
+                        "The interest on your Mithaq profile " + profile_id + " has closed",
+                        "Assalamu alaikum,\n\n"
+                        "The interest on your Mithaq profile " + profile_id + " has closed, as 5 days passed "
+                        "without a decision. No action is needed.\n\n"
+                        "— Mithaq Marriage",
+                    )
+
                 await context.bot.send_message(
                     chat_id=ADMIN_TELEGRAM_USER_ID,
                     text="⌛ Expired: considering request " + str(req["id"]) + " (profile " + profile_id + ") closed after 5 days.",
@@ -3182,8 +3218,43 @@ async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await advance_queue(profile_id, context, repost_if_empty=False)
                 continue
 
+            # ── 4-day final reminder ──
+            if age >= timedelta(days=4) and req.get("consideration_started_at") and not req.get("consideration_day4_sent"):
+                if owner_tg:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=owner_tg,
+                            text=(
+                                "Salam. The interest on your profile " + profile_id + " closes tomorrow. "
+                                "If you're not interested, please tap Decline now so they can move on. "
+                                "If you'd like to go ahead, tap Approve. The buttons are on the original "
+                                "message above. JazakAllah khair. 🤲"
+                            ),
+                        )
+                    except Exception as e:
+                        logging.warning("Consideration day-4 nudge failed: " + str(e))
+                if owner_email:
+                    send_consideration_email(
+                        owner_email,
+                        "Closes tomorrow: interest in your Mithaq profile " + profile_id,
+                        "Assalamu alaikum,\n\n"
+                        "The interest on your Mithaq profile " + profile_id + " closes tomorrow.\n\n"
+                        "If you're not interested, please tap Decline now so they can move on. "
+                        "If you'd like to go ahead, tap Approve. The buttons are in your messages "
+                        "from our bot on Telegram:\n"
+                        "https://t.me/" + BOT_USERNAME + "\n\n"
+                        "JazakAllah khair,\n"
+                        "— Mithaq Marriage",
+                    )
+                supabase.table("requests").update({"consideration_day4_sent": True}).eq("id", req["id"]).execute()
+                await context.bot.send_message(
+                    chat_id=ADMIN_TELEGRAM_USER_ID,
+                    text="🔔 Day-4 final reminder sent for considering request " + str(req["id"]) + " (profile " + profile_id + ").",
+                )
+                continue
+
             # ── 2-day nudge ──
-            if age >= timedelta(days=2) and req.get("consideration_started_at") and not req.get("consideration_nudge_sent"):
+            if age >= timedelta(days=2) and req.get("consideration_started_at") and not req.get("consideration_nudge_sent") and not req.get("consideration_day4_sent"):
                 if owner_tg:
                     try:
                         await context.bot.send_message(
@@ -3199,6 +3270,20 @@ async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
                         )
                     except Exception as e:
                         logging.warning("Consideration nudge failed: " + str(e))
+                if owner_email:
+                    send_consideration_email(
+                        owner_email,
+                        "A gentle reminder about your Mithaq profile " + profile_id,
+                        "Assalamu alaikum,\n\n"
+                        "You asked for time to consider the interest on your Mithaq profile " + profile_id + ". "
+                        "The Approve and Decline buttons are still in your messages from our bot on Telegram "
+                        "whenever you're ready:\n"
+                        "https://t.me/" + BOT_USERNAME + "\n\n"
+                        "The request stays open for another 3 days. If it's still undecided then, it will "
+                        "close on its own.\n\n"
+                        "May Allah guide you to what is best,\n"
+                        "— Mithaq Marriage",
+                    )
                 supabase.table("requests").update({"consideration_nudge_sent": True}).eq("id", req["id"]).execute()
                 await context.bot.send_message(
                     chat_id=ADMIN_TELEGRAM_USER_ID,
@@ -3208,79 +3293,134 @@ async def check_consideration(context: ContextTypes.DEFAULT_TYPE) -> None:
         logging.warning("check_consideration error: " + str(e))
 
 
-# ── SendGrid email helpers ─────────────────────────────────────────────────────
+# ── Email helpers (Resend) ─────────────────────────────────────────────────────
 
-def send_welcome_email(to_email: str, profile_id: str) -> None:
-    if not SENDGRID_API_KEY:
+def _send_email(to_email: str, subject: str, body: str, label: str) -> None:
+    """Send a plain-text email via Resend. Best-effort: never raises, never blocks."""
+    if not RESEND_API_KEY:
+        logging.info(label + " email skipped (no RESEND_API_KEY)")
         return
     try:
-        requests.post(
-            "https://api.sendgrid.com/v3/mail/send",
+        r = requests.post(
+            "https://api.resend.com/emails",
             headers={
-                "Authorization": "Bearer " + SENDGRID_API_KEY,
+                "Authorization": "Bearer " + RESEND_API_KEY,
                 "Content-Type": "application/json",
             },
             json={
-                "personalizations": [{"to": [{"email": to_email}]}],
-                "from": {"email": "info@mithaqmarriage.com", "name": "Mithaq Marriage"},
-                "subject": "Welcome to Mithaq — your profile " + profile_id + " is live",
-                "content": [{
-                    "type": "text/plain",
-                    "value": (
-                        "Assalamu alaikum,\n\n"
-                        "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live.\n\n"
-                        "Next step: open Telegram and start our bot so you receive interest "
-                        "notifications directly:\n"
-                        "https://t.me/" + BOT_USERNAME + "\n\n"
-                        "Browse profiles in the private channel:\n"
-                        + CHANNEL_LINK + "\n\n"
-                        "You are in full control — nothing about you is shared without your approval.\n\n"
-                        "May Allah make it easy for you.\n"
-                        "— Mithaq Marriage\n"
-                        "mithaqmarriage.com"
-                    ),
-                }],
+                "from": "Mithaq Marriage <info@mithaqmarriage.com>",
+                "to": [to_email],
+                "subject": subject,
+                "text": body,
             },
             timeout=15,
         )
-        logging.info("Welcome email sent to " + to_email)
+        if r.status_code >= 300:
+            logging.warning(label + " email failed (" + str(r.status_code) + "): " + r.text[:200])
+        else:
+            logging.info(label + " email sent to " + to_email)
     except Exception as e:
-        logging.warning("Welcome email failed: " + str(e))
+        logging.warning(label + " email failed: " + str(e))
+
+
+def send_welcome_email(to_email: str, profile_id: str) -> None:
+    _send_email(
+        to_email,
+        "Welcome to Mithaq — your profile " + profile_id + " is live",
+        "Assalamu alaikum,\n\n"
+        "JazakAllahu khayran — your Mithaq profile " + profile_id + " is now live.\n\n"
+        "Next step: open Telegram and start our bot so you receive interest "
+        "notifications directly:\n"
+        "https://t.me/" + BOT_USERNAME + "\n\n"
+        "Browse profiles in the private channel:\n"
+        + CHANNEL_LINK + "\n\n"
+        "You are in full control — nothing about you is shared without your approval.\n\n"
+        "May Allah make it easy for you.\n"
+        "— Mithaq Marriage\n"
+        "mithaqmarriage.com",
+        "Welcome",
+    )
+
+
+def send_interest_email(to_email: str, profile_id: str) -> None:
+    """Sent the moment someone expresses interest (or the queue moves them up)."""
+    _send_email(
+        to_email,
+        "Someone has expressed interest in your Mithaq profile " + profile_id,
+        "Assalamu alaikum,\n\n"
+        "Someone has expressed interest in your Mithaq profile " + profile_id + ".\n\n"
+        "Open Telegram and check your messages from our bot to see their profile and "
+        "Approve, Decline, or take time to consider:\n"
+        "https://t.me/" + BOT_USERNAME + "\n\n"
+        "Nothing about you is shared unless you approve.\n\n"
+        "JazakAllahu khayran,\n"
+        "— Mithaq Marriage",
+        "Interest",
+    )
 
 
 def send_reminder_email(to_email: str, profile_id: str) -> None:
-    if not SENDGRID_API_KEY:
-        return
-    try:
-        requests.post(
-            "https://api.sendgrid.com/v3/mail/send",
-            headers={
-                "Authorization": "Bearer " + SENDGRID_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "personalizations": [{"to": [{"email": to_email}]}],
-                "from": {"email": "info@mithaqmarriage.com", "name": "Mithaq Marriage"},
-                "subject": "Someone has expressed interest in your Mithaq profile",
-                "content": [{
-                    "type": "text/plain",
-                    "value": (
-                        "Assalamu alaikum,\n\n"
-                        "Someone has expressed interest in your Mithaq profile " + profile_id + " "
-                        "and is waiting for your response.\n\n"
-                        "Open Telegram and check your messages from our bot to Approve, Decline, "
-                        "or take time to consider:\n"
-                        "https://t.me/" + BOT_USERNAME + "\n\n"
-                        "JazakAllahu khayran,\n"
-                        "— Mithaq Marriage"
-                    ),
-                }],
-            },
-            timeout=15,
+    """2-hour reminder when a new request is still unanswered."""
+    _send_email(
+        to_email,
+        "Reminder: someone is waiting for your response on Mithaq",
+        "Assalamu alaikum,\n\n"
+        "A gentle reminder: someone has expressed interest in your Mithaq profile " + profile_id + " "
+        "and is still waiting for your response.\n\n"
+        "Open Telegram and check your messages from our bot to Approve, Decline, "
+        "or take time to consider:\n"
+        "https://t.me/" + BOT_USERNAME + "\n\n"
+        "JazakAllahu khayran,\n"
+        "— Mithaq Marriage",
+        "Reminder",
+    )
+
+
+def send_consideration_email(to_email: str, subject: str, body: str) -> None:
+    """Consideration-flow emails (day-2, day-4, close)."""
+    _send_email(to_email, subject, body, "Consideration")
+
+
+def send_approval_email(to_email: str, profile_id: str, is_requester: bool) -> None:
+    """Approval notice. Contact details are never emailed; they stay in Telegram."""
+    if is_requester:
+        body = (
+            "Assalamu alaikum,\n\n"
+            "Alhamdulillah — your interest in Mithaq profile " + profile_id + " has been approved.\n\n"
+            "The introduction details are waiting for you in your messages from our bot on Telegram:\n"
+            "https://t.me/" + BOT_USERNAME + "\n\n"
+            "Please reach out with respect, patience and good character. "
+            "From here it is between you both, your walis, and Allah. May He put barakah in it.\n\n"
+            "— Mithaq Marriage"
         )
-        logging.info("Reminder email sent to " + to_email)
-    except Exception as e:
-        logging.warning("Reminder email failed: " + str(e))
+    else:
+        body = (
+            "Assalamu alaikum,\n\n"
+            "Alhamdulillah — you have approved the interest on your Mithaq profile " + profile_id + ".\n\n"
+            "The introduction details are in your messages from our bot on Telegram:\n"
+            "https://t.me/" + BOT_USERNAME + "\n\n"
+            "While this introduction is open your profile is paused. If it doesn't progress, "
+            "send /available in the bot to return to the pool.\n\n"
+            "May Allah put barakah in it.\n"
+            "— Mithaq Marriage"
+        )
+    _send_email(to_email, "Your Mithaq introduction on " + profile_id + " has been approved", body, "Approval")
+
+
+def send_decline_email(to_email: str, profile_id: str, reason_text: str) -> None:
+    _send_email(
+        to_email,
+        "An update on your interest in Mithaq profile " + profile_id,
+        "Assalamu alaikum,\n\n"
+        "JazakAllahu khayran for your interest in Mithaq profile " + profile_id + ". "
+        "Unfortunately this match was not taken forward at this time.\n\n"
+        "Reason: " + reason_text + "\n\n"
+        "You are welcome to express interest in another profile whenever you're ready:\n"
+        "https://t.me/" + BOT_USERNAME + "\n\n"
+        "May Allah guide you to what is best,\n"
+        "— Mithaq Marriage",
+        "Decline",
+    )
 
 
 # ── Admin: ask sisters where they heard about Mithaq ───────────────────────────
